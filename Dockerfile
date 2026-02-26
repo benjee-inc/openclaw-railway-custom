@@ -80,11 +80,21 @@ RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    build-essential \
+    gcc \
+    g++ \
+    make \
+    procps \
+    file \
     git \
     gosu \
-    procps \
     python3 \
-    build-essential \
+    python3-pip \
+    pkg-config \
+    sudo \
+    jq \
+    ripgrep \
+    ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -118,6 +128,34 @@ ENV HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
 ENV HOMEBREW_CELLAR="/home/linuxbrew/.linuxbrew/Cellar"
 ENV HOMEBREW_REPOSITORY="/home/linuxbrew/.linuxbrew/Homebrew"
 
+# ── OpenClaw Skills: Homebrew CLI tools (must run as non-root) ──
+RUN brew install gh himalaya yt-dlp
+
+USER root
+
+# ── OpenClaw Skills: npm CLI tools ──
+RUN npm install -g @steipete/summarize @steipete/bird clawhub mcporter twitter-api-v2 @blockrun/clawrouter viem "@solana/web3.js@^1" @polymarket/clob-client ethers@5
+
+# Install custom skill CLIs
+RUN chmod +x /app/src/skills/x-api/x-api.mjs \
+  && ln -sf /app/src/skills/x-api/x-api.mjs /usr/local/bin/x-api \
+  && chmod +x /app/src/skills/moon/moon.mjs \
+  && ln -sf /app/src/skills/moon/moon.mjs /usr/local/bin/moon
+
+# Copy custom skills into OpenClaw's source tree for gateway discovery
+RUN SKILL_MD=$(find /openclaw -name "SKILL.md" -type f 2>/dev/null | head -1) && \
+  if [ -n "$SKILL_MD" ]; then \
+    SKILLS_ROOT=$(dirname "$(dirname "$SKILL_MD")") && \
+    echo "[skills] Auto-detected skills root: $SKILLS_ROOT" && \
+    cp -r /app/src/skills/* "$SKILLS_ROOT/" && \
+    echo "[skills] Installed custom skills:" && ls "$SKILLS_ROOT/"; \
+  else \
+    echo "[skills] No built-in SKILL.md found, trying /openclaw/skills/" && \
+    mkdir -p /openclaw/skills && \
+    cp -r /app/src/skills/* /openclaw/skills/; \
+  fi
+
+USER openclaw
 ENV PORT=8080
 EXPOSE 8080
 

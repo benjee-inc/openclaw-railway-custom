@@ -1,5 +1,6 @@
 import childProcess from "node:child_process";
 import crypto from "node:crypto";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -174,19 +175,227 @@ async function startGateway() {
   }
 
   // Sync wrapper token to openclaw.json before every gateway start.
-  // This ensures the gateway's config-file token matches what the wrapper injects via proxy.
+  // Write directly to JSON file instead of using `openclaw config set` CLI,
+  // because plugins (e.g. ClawRouter) hook into all openclaw commands and
+  // can prevent the process from exiting, hanging the gateway startup forever.
   console.log(`[gateway] ========== GATEWAY START TOKEN SYNC ==========`);
-  console.log(`[gateway] Syncing wrapper token to config (length: ${OPENCLAW_GATEWAY_TOKEN.length})`);
-  debug(`[gateway] Token preview: ${OPENCLAW_GATEWAY_TOKEN.slice(0, 16)}...`);
+  console.log(`[gateway] Syncing wrapper token to config (direct JSON write): ${OPENCLAW_GATEWAY_TOKEN.slice(0, 16)}... (len: ${OPENCLAW_GATEWAY_TOKEN.length})`);
 
-  const syncResult = await runCmd(
-    OPENCLAW_NODE,
-    clawArgs(["config", "set", "gateway.auth.token", OPENCLAW_GATEWAY_TOKEN]),
-  );
+  try {
+    const cfgPath = configPath();
+    const config = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
 
-  console.log(`[gateway] Sync result: exit code ${syncResult.code}`);
-  if (syncResult.output?.trim()) {
-    console.log(`[gateway] Sync output: ${syncResult.output}`);
+    // Ensure nested structure exists
+    if (!config.gateway) config.gateway = {};
+    if (!config.gateway.auth) config.gateway.auth = {};
+    config.gateway.auth.token = OPENCLAW_GATEWAY_TOKEN;
+
+    // ── ClawRouter conditional setup ──
+    const useClawRouter = process.env.USE_CLAWROUTER?.toLowerCase() === "true";
+    const walletKey = process.env.BLOCKRUN_WALLET_KEY?.trim();
+
+    if (useClawRouter && walletKey) {
+      console.log(`[clawrouter] USE_CLAWROUTER=true, setting up ClawRouter extension...`);
+
+      // Copy ClawRouter from npm global install to OpenClaw extensions dir
+      const clawSrc = "/usr/local/lib/node_modules/@blockrun/clawrouter";
+      const extDir = path.join(STATE_DIR, "extensions", "clawrouter");
+      if (fs.existsSync(clawSrc)) {
+        fs.mkdirSync(extDir, { recursive: true });
+        for (const file of fs.readdirSync(clawSrc)) {
+          const srcFile = path.join(clawSrc, file);
+          const dstFile = path.join(extDir, file);
+          if (fs.statSync(srcFile).isDirectory()) {
+            fs.cpSync(srcFile, dstFile, { recursive: true, force: true });
+          } else {
+            fs.copyFileSync(srcFile, dstFile);
+          }
+        }
+        console.log(`[clawrouter] Copied extension to ${extDir}`);
+      } else {
+        console.error(`[clawrouter] WARNING: @blockrun/clawrouter not found at ${clawSrc}`);
+      }
+
+      // Clean up stale plugin config
+      if (config.plugins?.entries?.clawrouter) delete config.plugins.entries.clawrouter;
+      if (config.plugins?.paths) delete config.plugins.paths;
+
+      // Backup original model and switch to blockrun/auto
+      const currentModel = config.agents?.defaults?.model?.primary || config.agent?.model;
+      if (currentModel && currentModel !== "blockrun/auto") {
+        fs.writeFileSync(path.join(STATE_DIR, "clawrouter-original-model.txt"), currentModel, "utf8");
+        console.log(`[clawrouter] Backed up original model: ${currentModel}`);
+      }
+      if (config._clawrouter) delete config._clawrouter;
+      if (!config.agents) config.agents = {};
+      if (!config.agents.defaults) config.agents.defaults = {};
+      if (!config.agents.defaults.model) config.agents.defaults.model = {};
+      config.agents.defaults.model.primary = "blockrun/auto";
+      if (config.agent) delete config.agent;
+      // Override per-agent model configs
+      for (const [agentId, agentCfg] of Object.entries(config.agents)) {
+        if (agentId === "defaults" || !agentCfg || typeof agentCfg !== "object") continue;
+        if (agentCfg.model?.primary) {
+          agentCfg.model.primary = "blockrun/auto";
+        }
+      }
+      console.log(`[clawrouter] Set agent model to blockrun/auto`);
+
+      // Auth profile for blockrun provider
+      if (!config.auth) config.auth = {};
+      if (!config.auth.profiles) config.auth.profiles = {};
+      config.auth.profiles["blockrun:default"] = { provider: "blockrun", mode: "api_key" };
+
+      // Write blockrun API key to agent auth-profiles.json
+      const mainAgentDir = path.join(STATE_DIR, "agents", "main", "agent");
+      fs.mkdirSync(mainAgentDir, { recursive: true });
+      let mainStore = { version: 1, profiles: {} };
+      try {
+        const existing = JSON.parse(fs.readFileSync(path.join(mainAgentDir, "auth-profiles.json"), "utf8"));
+        mainStore = existing.profiles ? existing : { version: 1, profiles: existing };
+      } catch {}
+      mainStore.profiles["blockrun:default"] = { type: "api_key", provider: "blockrun", key: "blockrun-local" };
+      fs.writeFileSync(path.join(mainAgentDir, "auth-profiles.json"), JSON.stringify(mainStore, null, 2), "utf8");
+
+      // Write provider models config
+      const CLAWROUTER_PORT = 8402;
+      if (!config.models) config.models = {};
+      if (!config.models.providers) config.models.providers = {};
+      try {
+        const esmRequire = createRequire(import.meta.url);
+        const clawRouterPkg = esmRequire("@blockrun/clawrouter");
+        const providerModels = clawRouterPkg.buildProviderModels(`http://127.0.0.1:${CLAWROUTER_PORT}`);
+        config.models.providers.blockrun = { ...providerModels, apiKey: "x402-proxy-handles-auth" };
+        console.log(`[clawrouter] Wrote models.providers.blockrun`);
+      } catch (err) {
+        console.warn(`[clawrouter] Failed to load models, using minimal config: ${err.message}`);
+        config.models.providers.blockrun = {
+          baseUrl: `http://127.0.0.1:${CLAWROUTER_PORT}/v1`,
+          api: "openai-completions", apiKey: "x402-proxy-handles-auth",
+          models: [{ id: "auto", name: "Auto (Smart Router)", api: "openai-completions", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+        };
+      }
+      if (!config.env) config.env = {};
+      config.env.BLOCKRUN_API_KEY = "blockrun-local";
+
+      // Write wallet key
+      const walletDir = path.join(STATE_DIR, "blockrun");
+      fs.mkdirSync(walletDir, { recursive: true });
+      fs.writeFileSync(path.join(walletDir, "wallet.key"), walletKey, { encoding: "utf8", mode: 0o600 });
+      console.log(`[clawrouter] Wrote wallet key`);
+
+    } else {
+      if (useClawRouter && !walletKey) {
+        console.warn(`[clawrouter] USE_CLAWROUTER=true but BLOCKRUN_WALLET_KEY not set, skipping`);
+      }
+      // Clean stale ClawRouter config
+      if (config.plugins?.entries?.clawrouter) delete config.plugins.entries.clawrouter;
+      if (config.plugins?.paths) delete config.plugins.paths;
+      if (config.auth?.profiles?.["blockrun:default"]) delete config.auth.profiles["blockrun:default"];
+      if (config.models?.providers?.blockrun) delete config.models.providers.blockrun;
+      if (config.env?.BLOCKRUN_API_KEY) delete config.env.BLOCKRUN_API_KEY;
+
+      // Restore original model if backed up
+      const crBackup = path.join(STATE_DIR, "clawrouter-original-model.txt");
+      if (fs.existsSync(crBackup)) {
+        const restored = fs.readFileSync(crBackup, "utf8").trim();
+        if (restored) {
+          if (!config.agents) config.agents = {};
+          if (!config.agents.defaults) config.agents.defaults = {};
+          if (!config.agents.defaults.model) config.agents.defaults.model = {};
+          config.agents.defaults.model.primary = restored;
+          if (config.agent) delete config.agent;
+          console.log(`[clawrouter] Restored original model: ${restored}`);
+        }
+        fs.unlinkSync(crBackup);
+      }
+      if (config._clawrouter) delete config._clawrouter;
+    }
+
+    // Clean up stale OpenRouter artifacts (feature removed)
+    if (config._openrouter) delete config._openrouter;
+    const orBackup = path.join(STATE_DIR, "openrouter-original-model.txt");
+    if (fs.existsSync(orBackup)) {
+      const restored = fs.readFileSync(orBackup, "utf8").trim();
+      if (restored && !useClawRouter) {
+        if (!config.agents) config.agents = {};
+        if (!config.agents.defaults) config.agents.defaults = {};
+        if (!config.agents.defaults.model) config.agents.defaults.model = {};
+        config.agents.defaults.model.primary = restored;
+        if (config.agent) delete config.agent;
+        console.log(`[gateway] Restored original model from OpenRouter backup: ${restored}`);
+      }
+      fs.unlinkSync(orBackup);
+    }
+    // Strip orphaned models
+    const finalModel = config.agents?.defaults?.model?.primary;
+    if (!useClawRouter && (finalModel?.startsWith("openrouter/") || finalModel === "blockrun/auto")) {
+      const fallback = process.env.DEFAULT_MODEL?.trim();
+      if (fallback) {
+        config.agents.defaults.model.primary = fallback;
+        console.log(`[gateway] Orphaned model "${finalModel}" — reset to DEFAULT_MODEL: ${fallback}`);
+      } else {
+        delete config.agents.defaults.model;
+        console.log(`[gateway] Orphaned model "${finalModel}" — removed (OpenClaw will use built-in default)`);
+      }
+    }
+
+    // Keep channel plugin entries enabled
+    if (config.plugins?.entries) {
+      for (const [name, entry] of Object.entries(config.plugins.entries)) {
+        if (config.channels?.[name] && entry.enabled === false) {
+          console.log(`[gateway] Re-enabling plugins.entries.${name}`);
+          entry.enabled = true;
+        }
+      }
+    }
+
+    fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2), "utf8");
+
+    // Verify token sync
+    const verify = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    const configToken = verify?.gateway?.auth?.token;
+    if (configToken !== OPENCLAW_GATEWAY_TOKEN) {
+      throw new Error(`Token mismatch: wrapper=${OPENCLAW_GATEWAY_TOKEN.slice(0, 16)}... config=${(configToken || "null")?.slice?.(0, 16)}...`);
+    }
+    console.log(`[gateway] Token sync + verification PASSED`);
+  } catch (err) {
+    console.error(`[gateway] ERROR: Config sync failed: ${err}`);
+    throw err;
+  }
+
+  console.log(`[gateway] ========== CONFIG SYNC COMPLETE ==========`);
+
+  // ── Custom skill instructions ──
+  // Write skill SKILL.md content to workspace CLAUDE.md
+  try {
+    const appSkillsDir = path.join(process.cwd(), "src", "skills");
+    if (fs.existsSync(appSkillsDir)) {
+      let skillInstructions = "";
+      for (const name of fs.readdirSync(appSkillsDir)) {
+        const skillMd = path.join(appSkillsDir, name, "SKILL.md");
+        if (fs.existsSync(skillMd)) {
+          const content = fs.readFileSync(skillMd, "utf8");
+          const body = content.replace(/^---[\s\S]*?---\n*/, "");
+          skillInstructions += body + "\n\n";
+          console.log(`[skills] Loaded skill doc: ${name}`);
+        }
+      }
+      if (skillInstructions.trim()) {
+        fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+        const claudeMdPath = path.join(WORKSPACE_DIR, "CLAUDE.md");
+        const MARKER = "<!-- CUSTOM_SKILLS -->";
+        let existing = "";
+        try { existing = fs.readFileSync(claudeMdPath, "utf8"); } catch {}
+        const markerIdx = existing.indexOf(MARKER);
+        if (markerIdx >= 0) existing = existing.substring(0, markerIdx);
+        const finalContent = existing.trimEnd() + "\n\n" + MARKER + "\n\n" + skillInstructions;
+        fs.writeFileSync(claudeMdPath, finalContent, "utf8");
+        console.log(`[skills] Wrote skill docs to ${claudeMdPath}`);
+      }
+    }
+  } catch (err) {
+    console.error(`[skills] Failed to install skill docs: ${err}`);
   }
 
   const args = [
@@ -203,13 +412,19 @@ async function startGateway() {
     "--allow-unconfigured",
   ];
 
+  const gatewayEnv = {
+    ...process.env,
+    OPENCLAW_STATE_DIR: STATE_DIR,
+    OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+  };
+  // ClawRouter local server doesn't validate API keys, but OpenClaw requires one
+  if (process.env.USE_CLAWROUTER?.toLowerCase() === "true") {
+    gatewayEnv.BLOCKRUN_API_KEY = "blockrun-local";
+  }
+
   gatewayProc = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
     stdio: "inherit",
-    env: {
-      ...process.env,
-      OPENCLAW_STATE_DIR: STATE_DIR,
-      OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
-    },
+    env: gatewayEnv,
   });
 
   const safeArgs = args.map((arg, i) =>
