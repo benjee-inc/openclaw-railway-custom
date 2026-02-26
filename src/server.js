@@ -327,16 +327,28 @@ async function startGateway() {
       }
       fs.unlinkSync(orBackup);
     }
-    // Strip orphaned models
+    // Strip orphaned models from defaults and all per-agent overrides
+    const isOrphanedModel = (m) =>
+      m?.startsWith("openrouter/") || m?.startsWith("kimi-coding/") || m === "blockrun/auto";
     const finalModel = config.agents?.defaults?.model?.primary;
-    if (!useClawRouter && (finalModel?.startsWith("openrouter/") || finalModel === "blockrun/auto")) {
+    if (!useClawRouter && isOrphanedModel(finalModel)) {
       const fallback = process.env.DEFAULT_MODEL?.trim();
       if (fallback) {
         config.agents.defaults.model.primary = fallback;
-        console.log(`[gateway] Orphaned model "${finalModel}" — reset to DEFAULT_MODEL: ${fallback}`);
+        console.log(`[gateway] Orphaned default model "${finalModel}" — reset to DEFAULT_MODEL: ${fallback}`);
       } else {
         delete config.agents.defaults.model;
-        console.log(`[gateway] Orphaned model "${finalModel}" — removed (OpenClaw will use built-in default)`);
+        console.log(`[gateway] Orphaned default model "${finalModel}" — removed (OpenClaw will use built-in default)`);
+      }
+    }
+    // Also clean per-agent model overrides
+    if (config.agents) {
+      for (const [agentId, agentCfg] of Object.entries(config.agents)) {
+        if (agentId === "defaults" || !agentCfg || typeof agentCfg !== "object") continue;
+        if (isOrphanedModel(agentCfg.model?.primary)) {
+          console.log(`[gateway] Removing orphaned model from agent '${agentId}': ${agentCfg.model.primary}`);
+          delete agentCfg.model;
+        }
       }
     }
 
