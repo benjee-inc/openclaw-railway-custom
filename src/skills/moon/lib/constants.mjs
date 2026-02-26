@@ -89,8 +89,10 @@ export const AERO_FACTORY_ABI = parseAbi([
 
 // ─── Polymarket (Polygon) ───────────────────────────────────────────────────
 
-export const POLYMARKET_CLOB_HOST = "https://clob.polymarket.com";
-export const POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com";
+// If POLYMARKET_PROXY_URL is set (e.g. Cloudflare Worker in EU), route through it
+const _proxy = process.env.POLYMARKET_PROXY_URL?.replace(/\/+$/, "");
+export const POLYMARKET_CLOB_HOST = _proxy ? `${_proxy}/clob` : "https://clob.polymarket.com";
+export const POLYMARKET_GAMMA_API = _proxy ? `${_proxy}/gamma` : "https://gamma-api.polymarket.com";
 export const POLYMARKET_CHAIN_ID = 137;
 export const POLY_CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
 export const POLY_NEG_RISK_CTF_EXCHANGE = "0xc5d563a36ae78145c45a50134d48a1215220f80a";
