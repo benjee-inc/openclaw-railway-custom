@@ -1185,27 +1185,19 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
       }
       result = await runCmd(OPENCLAW_NODE, clawArgs(["cron", "rm", cronId]));
     } else if (command === "openclaw.cron.add") {
-      // arg is the full cron add arguments as a JSON object
+      // arg is a JSON array of CLI arguments for `openclaw cron add`
       const cronArgs = arg?.trim();
       if (!cronArgs) {
-        return res.status(400).json({ ok: false, error: "Cron args required (JSON object with name, cmd, schedule, etc.)" });
+        return res.status(400).json({ ok: false, error: "Cron args required (JSON array of CLI args)" });
       }
       let parsed;
       try { parsed = JSON.parse(cronArgs); } catch {
-        return res.status(400).json({ ok: false, error: "Invalid JSON for cron args" });
+        return res.status(400).json({ ok: false, error: "Invalid JSON for cron args (must be array of strings)" });
       }
-      const args = ["cron", "add"];
-      if (parsed.name) args.push("--name", String(parsed.name));
-      if (parsed.command) args.push("--command", String(parsed.command));
-      if (parsed.cmd) args.push("--command", String(parsed.cmd));
-      if (parsed.cron) args.push("--cron", String(parsed.cron));
-      if (parsed.schedule) args.push("--cron", String(parsed.schedule));
-      if (parsed.every) args.push("--every", String(parsed.every));
-      if (parsed.at) args.push("--at", String(parsed.at));
-      if (parsed.target) args.push("--target", String(parsed.target));
-      if (parsed.model) args.push("--model", String(parsed.model));
-      if (parsed.noDeliver) args.push("--no-deliver");
-      result = await runCmd(OPENCLAW_NODE, clawArgs(args));
+      if (!Array.isArray(parsed)) {
+        return res.status(400).json({ ok: false, error: "Cron args must be a JSON array of strings" });
+      }
+      result = await runCmd(OPENCLAW_NODE, clawArgs(["cron", "add", ...parsed.map(String)]));
     } else {
       // Should never reach here due to allowlist check
       return res.status(500).json({
