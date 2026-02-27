@@ -220,25 +220,13 @@ async function startGateway() {
       if (config.plugins?.entries?.clawrouter) delete config.plugins.entries.clawrouter;
       if (config.plugins?.paths) delete config.plugins.paths;
 
-      // Backup original model and switch to blockrun/auto
-      const currentModel = config.agents?.defaults?.model?.primary || config.agent?.model;
-      if (currentModel && currentModel !== "blockrun/auto") {
-        fs.writeFileSync(path.join(STATE_DIR, "clawrouter-original-model.txt"), currentModel, "utf8");
-        console.log(`[clawrouter] Backed up original model: ${currentModel}`);
-      }
+      // Set model to blockrun/auto for ClawRouter
       if (config._clawrouter) delete config._clawrouter;
       if (!config.agents) config.agents = {};
       if (!config.agents.defaults) config.agents.defaults = {};
       if (!config.agents.defaults.model) config.agents.defaults.model = {};
       config.agents.defaults.model.primary = "blockrun/auto";
       if (config.agent) delete config.agent;
-      // Override per-agent model configs
-      for (const [agentId, agentCfg] of Object.entries(config.agents)) {
-        if (agentId === "defaults" || !agentCfg || typeof agentCfg !== "object") continue;
-        if (agentCfg.model?.primary) {
-          agentCfg.model.primary = "blockrun/auto";
-        }
-      }
       console.log(`[clawrouter] Set agent model to blockrun/auto`);
 
       // Auth profile for blockrun provider
@@ -295,62 +283,13 @@ async function startGateway() {
       if (config.models?.providers?.blockrun) delete config.models.providers.blockrun;
       if (config.env?.BLOCKRUN_API_KEY) delete config.env.BLOCKRUN_API_KEY;
 
-      // Restore original model if backed up
-      const crBackup = path.join(STATE_DIR, "clawrouter-original-model.txt");
-      if (fs.existsSync(crBackup)) {
-        const restored = fs.readFileSync(crBackup, "utf8").trim();
-        if (restored) {
-          if (!config.agents) config.agents = {};
-          if (!config.agents.defaults) config.agents.defaults = {};
-          if (!config.agents.defaults.model) config.agents.defaults.model = {};
-          config.agents.defaults.model.primary = restored;
-          if (config.agent) delete config.agent;
-          console.log(`[clawrouter] Restored original model: ${restored}`);
-        }
-        fs.unlinkSync(crBackup);
-      }
       if (config._clawrouter) delete config._clawrouter;
     }
 
     // Clean up stale OpenRouter artifacts (feature removed)
     if (config._openrouter) delete config._openrouter;
     const orBackup = path.join(STATE_DIR, "openrouter-original-model.txt");
-    if (fs.existsSync(orBackup)) {
-      const restored = fs.readFileSync(orBackup, "utf8").trim();
-      if (restored && !useClawRouter) {
-        if (!config.agents) config.agents = {};
-        if (!config.agents.defaults) config.agents.defaults = {};
-        if (!config.agents.defaults.model) config.agents.defaults.model = {};
-        config.agents.defaults.model.primary = restored;
-        if (config.agent) delete config.agent;
-        console.log(`[gateway] Restored original model from OpenRouter backup: ${restored}`);
-      }
-      fs.unlinkSync(orBackup);
-    }
-    // Strip orphaned models from defaults and all per-agent overrides
-    const isOrphanedModel = (m) =>
-      m?.startsWith("openrouter/") || m?.startsWith("kimi-coding/") || m === "blockrun/auto";
-    const finalModel = config.agents?.defaults?.model?.primary;
-    if (!useClawRouter && isOrphanedModel(finalModel)) {
-      const fallback = process.env.DEFAULT_MODEL?.trim();
-      if (fallback) {
-        config.agents.defaults.model.primary = fallback;
-        console.log(`[gateway] Orphaned default model "${finalModel}" — reset to DEFAULT_MODEL: ${fallback}`);
-      } else {
-        delete config.agents.defaults.model;
-        console.log(`[gateway] Orphaned default model "${finalModel}" — removed (OpenClaw will use built-in default)`);
-      }
-    }
-    // Also clean per-agent model overrides
-    if (config.agents) {
-      for (const [agentId, agentCfg] of Object.entries(config.agents)) {
-        if (agentId === "defaults" || !agentCfg || typeof agentCfg !== "object") continue;
-        if (isOrphanedModel(agentCfg.model?.primary)) {
-          console.log(`[gateway] Removing orphaned model from agent '${agentId}': ${agentCfg.model.primary}`);
-          delete agentCfg.model;
-        }
-      }
-    }
+    if (fs.existsSync(orBackup)) fs.unlinkSync(orBackup);
 
     // Keep channel plugin entries enabled
     if (config.plugins?.entries) {
