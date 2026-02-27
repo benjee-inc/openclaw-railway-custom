@@ -135,7 +135,7 @@ RUN brew install gh himalaya yt-dlp
 USER root
 
 # ── OpenClaw Skills: npm CLI tools ──
-RUN npm install -g @steipete/summarize @steipete/bird clawhub mcporter twitter-api-v2 @blockrun/clawrouter viem "@solana/web3.js@^1" @polymarket/clob-client ethers@5
+RUN npm install -g @steipete/summarize @steipete/bird clawhub mcporter twitter-api-v2 viem "@solana/web3.js@^1" @polymarket/clob-client ethers@5
 
 # Make globally installed packages resolvable by ESM imports in /app (auto-trader needs these)
 ENV NODE_PATH="/usr/local/lib/node_modules"
