@@ -1196,8 +1196,12 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
       }
       const args = ["cron", "add"];
       if (parsed.name) args.push("--name", String(parsed.name));
-      if (parsed.cmd) args.push("--cmd", String(parsed.cmd));
-      if (parsed.schedule) args.push("--schedule", String(parsed.schedule));
+      if (parsed.command) args.push("--command", String(parsed.command));
+      if (parsed.cmd) args.push("--command", String(parsed.cmd));
+      if (parsed.cron) args.push("--cron", String(parsed.cron));
+      if (parsed.schedule) args.push("--cron", String(parsed.schedule));
+      if (parsed.every) args.push("--every", String(parsed.every));
+      if (parsed.at) args.push("--at", String(parsed.at));
       if (parsed.target) args.push("--target", String(parsed.target));
       if (parsed.model) args.push("--model", String(parsed.model));
       if (parsed.noDeliver) args.push("--no-deliver");
