@@ -1053,6 +1053,7 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "openclaw.devices.approve",
   "openclaw.plugins.list",
   "openclaw.plugins.enable",
+  "openclaw.models.set",
 ]);
 
 // Debug console command handler (POST /setup/api/console/run)
@@ -1154,6 +1155,21 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
         });
       }
       result = await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "enable", pluginName]));
+    } else if (command === "openclaw.models.set") {
+      const modelId = arg?.trim();
+      if (!modelId) {
+        return res.status(400).json({
+          ok: false,
+          error: "Model ID required (e.g., moonshotai/kimi-k2-thinking)",
+        });
+      }
+      if (!/^[A-Za-z0-9_/.-]+$/.test(modelId)) {
+        return res.status(400).json({
+          ok: false,
+          error: "Invalid model ID format",
+        });
+      }
+      result = await runCmd(OPENCLAW_NODE, clawArgs(["models", "set", modelId]));
     } else {
       // Should never reach here due to allowlist check
       return res.status(500).json({
