@@ -1054,6 +1054,9 @@ const ALLOWED_CONSOLE_COMMANDS = new Set([
   "openclaw.plugins.list",
   "openclaw.plugins.enable",
   "openclaw.models.set",
+  "openclaw.cron.rm",
+  "openclaw.cron.add",
+  "openclaw.cron.list",
 ]);
 
 // Debug console command handler (POST /setup/api/console/run)
@@ -1170,6 +1173,35 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
         });
       }
       result = await runCmd(OPENCLAW_NODE, clawArgs(["models", "set", modelId]));
+    } else if (command === "openclaw.cron.list") {
+      result = await runCmd(OPENCLAW_NODE, clawArgs(["cron", "list"]));
+    } else if (command === "openclaw.cron.rm") {
+      const cronId = arg?.trim();
+      if (!cronId) {
+        return res.status(400).json({ ok: false, error: "Cron ID required" });
+      }
+      if (!/^[A-Za-z0-9_-]+$/.test(cronId)) {
+        return res.status(400).json({ ok: false, error: "Invalid cron ID format" });
+      }
+      result = await runCmd(OPENCLAW_NODE, clawArgs(["cron", "rm", cronId]));
+    } else if (command === "openclaw.cron.add") {
+      // arg is the full cron add arguments as a JSON object
+      const cronArgs = arg?.trim();
+      if (!cronArgs) {
+        return res.status(400).json({ ok: false, error: "Cron args required (JSON object with name, cmd, schedule, etc.)" });
+      }
+      let parsed;
+      try { parsed = JSON.parse(cronArgs); } catch {
+        return res.status(400).json({ ok: false, error: "Invalid JSON for cron args" });
+      }
+      const args = ["cron", "add"];
+      if (parsed.name) args.push("--name", String(parsed.name));
+      if (parsed.cmd) args.push("--cmd", String(parsed.cmd));
+      if (parsed.schedule) args.push("--schedule", String(parsed.schedule));
+      if (parsed.target) args.push("--target", String(parsed.target));
+      if (parsed.model) args.push("--model", String(parsed.model));
+      if (parsed.noDeliver) args.push("--no-deliver");
+      result = await runCmd(OPENCLAW_NODE, clawArgs(args));
     } else {
       // Should never reach here due to allowlist check
       return res.status(500).json({
