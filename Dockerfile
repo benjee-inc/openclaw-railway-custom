@@ -144,7 +144,9 @@ ENV NODE_PATH="/usr/local/lib/node_modules"
 RUN chmod +x /app/src/skills/x-api/x-api.mjs \
   && ln -sf /app/src/skills/x-api/x-api.mjs /usr/local/bin/x-api \
   && chmod +x /app/src/skills/moon/moon.mjs \
-  && ln -sf /app/src/skills/moon/moon.mjs /usr/local/bin/moon
+  && ln -sf /app/src/skills/moon/moon.mjs /usr/local/bin/moon \
+  && chmod +x /app/src/skills/polymarket-alpha/palpha.mjs \
+  && ln -sf /app/src/skills/polymarket-alpha/palpha.mjs /usr/local/bin/palpha
 
 # Copy custom skills into OpenClaw's source tree for gateway discovery
 RUN SKILL_MD=$(find /openclaw -name "SKILL.md" -type f 2>/dev/null | head -1) && \
