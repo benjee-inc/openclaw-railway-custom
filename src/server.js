@@ -9,6 +9,8 @@ import httpProxy from "http-proxy";
 import pty from "node-pty";
 import { WebSocketServer } from "ws";
 
+import { startScanner, stopScanner } from "./skills/moon/comprehensive-scanner.mjs";
+
 const PORT = Number.parseInt(process.env.PORT ?? "8080", 10);
 const STATE_DIR =
   process.env.OPENCLAW_STATE_DIR?.trim() ||
@@ -193,6 +195,16 @@ async function startGateway() {
         if (config.channels?.[name] && entry.enabled === false) {
           console.log(`[gateway] Re-enabling plugins.entries.${name}`);
           entry.enabled = true;
+        }
+      }
+    }
+
+    // Remove malformed provider entries (missing required baseUrl/models fields)
+    if (config.models?.providers) {
+      for (const [id, prov] of Object.entries(config.models.providers)) {
+        if (!prov.baseUrl || !Array.isArray(prov.models)) {
+          console.log(`[gateway] Removing malformed provider entry: ${id}`);
+          delete config.models.providers[id];
         }
       }
     }
@@ -1445,6 +1457,9 @@ const server = app.listen(PORT, () => {
     fs.chmodSync(path.join(STATE_DIR, "credentials"), 0o700);
   } catch {}
 
+  // Start Polymarket scanner (independent of gateway)
+  startScanner();
+
   // Auto-start the gateway if already configured so polling channels (Telegram/Discord/etc.)
   // work even if nobody visits the web UI.
   if (isConfigured()) {
@@ -1511,6 +1526,8 @@ server.on("upgrade", async (req, socket, head) => {
 async function gracefulShutdown(signal) {
   console.log(`[wrapper] received ${signal}, shutting down`);
   shuttingDown = true;
+
+  stopScanner();
 
   if (setupRateLimiter.cleanupInterval) {
     clearInterval(setupRateLimiter.cleanupInterval);
