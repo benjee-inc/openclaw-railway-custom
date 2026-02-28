@@ -104,6 +104,9 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod --frozen-lockfile && pnpm store prune
 
+# Install auto-trader dependencies locally (global npm installs aren't resolvable by ESM imports in /app)
+RUN cd /app && npm install --save "@solana/web3.js@^1" ethers@5 @polymarket/clob-client viem
+
 # Copy built openclaw
 COPY --from=openclaw-build /openclaw /openclaw
 
