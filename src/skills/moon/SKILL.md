@@ -287,8 +287,9 @@ When running autonomously (cron sessions, no user present), you may place trades
 
 ### What to avoid
 - Markets with near-zero volume (< $1K 24h) — no one is trading, you'll get stuck
-- Markets at extreme prices (> 95¢ or < 2¢) — no edge, bad risk/reward
-- Markets expiring in < 1 hour — too late, slippage risk
+- Markets at extreme prices (> 97¢ or < 1¢) with no upcoming catalyst — likely already priced in
+- Extreme-price markets ARE tradeable if resolution is near (< 48h) and you have conviction — size up to max since payout is nearly certain. A 96¢ YES expiring tomorrow that you're confident about is a great trade.
+- Markets expiring in < 30 minutes — too late, execution risk
 
 ### What's fair game
 - Political, geopolitical, economic, crypto, weather, culture, tech — all tradeable
