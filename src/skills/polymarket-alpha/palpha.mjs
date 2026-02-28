@@ -12,6 +12,7 @@ import { match, fetchAltData } from "./lib/matcher.mjs";
 import { score, recommendation } from "./lib/scorer.mjs";
 import { fetchOrderBook, analyzeDepth, latestSnapshotUrl } from "./lib/depth.mjs";
 import { buildGraph, detectViolations, graphStats, marketNetworkProfile } from "./lib/network.mjs";
+import { fetchResolved, fetchPriceHistory, fetchPmxtPrices, mergePriceHistories, replaySignal, analyze, sleep } from "./lib/backtest.mjs";
 
 // Min 24h volume to bother scoring (markets below this are illiquid noise)
 const MIN_VOLUME_24H = 1000;
@@ -41,6 +42,11 @@ Usage:
   palpha crossref                      Full cross-reference: alpha + depth + network
   palpha crossref --top 10             Top N cross-referenced signals
   palpha categorize                    Debug: show market classification
+  palpha backtest                       Backtest scorer against resolved markets
+  palpha backtest --categories crypto   Filter to categories (comma-separated)
+  palpha backtest --lookback 7,3,1      Lookback windows in days (default: 7,3,1)
+  palpha backtest --limit 200           Max resolved markets to fetch (default: 100)
+  palpha backtest --pmxt                Enrich prices with PMXT archive (requires DuckDB)
   palpha sources                       List data source status + connectivity
   palpha sources --test                Test all API endpoints
 
@@ -64,6 +70,7 @@ async function main() {
     crossref: cmdCrossref,
     categorize: cmdCategorize,
     sources: cmdSources,
+    backtest: cmdBacktest,
   };
 
   const fn = commands[command];
@@ -367,6 +374,9 @@ async function cmdSources(args) {
     { name: "arxiv", api: "export.arxiv.org", rateLimit: "~unlimited", ttl: "1hr", required: false },
     { name: "metaculus", api: "metaculus.com/api2", rateLimit: "~unlimited", ttl: "30min", required: false },
     { name: "trends", api: "trends.google.com", rateLimit: "varies", ttl: "15min", required: false, envVar: "SERPAPI_KEY" },
+    { name: "montecarlo", api: "n/a (local computation)", rateLimit: "unlimited", ttl: "5min", required: false },
+    { name: "particlefilter", api: "n/a (local computation)", rateLimit: "unlimited", ttl: "5min", required: false },
+    { name: "copula", api: "n/a (local computation)", rateLimit: "unlimited", ttl: "5min", required: false },
   ];
 
   if (!doTest) {
@@ -598,6 +608,23 @@ async function cmdCrossref(args) {
     // Build structured research from raw alt data
     const research = buildResearch(cat, altData, matchParams, scoreResult, market);
 
+    // Copula: check for correlated mispricing among same-category neighbors
+    let copulaResult = null;
+    const sameCatAlerts = topAlerts.filter((a) => a.cat === cat && a.market.conditionId !== market.conditionId);
+    if (sameCatAlerts.length >= 1) {
+      try {
+        const { analyzeCorrelatedMarkets } = await import("./lib/sources/copula.mjs");
+        const copulaMarkets = [
+          { question: market.question, price: market.prices?.[0] || 0.5 },
+          ...sameCatAlerts.slice(0, 9).map((a) => ({
+            question: a.market.question,
+            price: a.market.prices?.[0] || 0.5,
+          })),
+        ];
+        copulaResult = analyzeCorrelatedMarkets(copulaMarkets);
+      } catch { /* copula not critical */ }
+    }
+
     crossRefResults.push({
       conditionId: market.conditionId,
       question: market.question,
@@ -625,6 +652,13 @@ async function cmdCrossref(args) {
         riskLevel: profile.riskLevel,
         violations: profile.violations.length,
         neighbors: profile.neighbors.length,
+      } : null,
+      copula: copulaResult ? {
+        sweepProb: copulaResult.sweepProb,
+        tailDependence: copulaResult.tailDependence,
+        mispricing: copulaResult.mispricing,
+        mispricingDetail: copulaResult.mispricingDetail,
+        marketsAnalyzed: copulaResult.markets?.length || 0,
       } : null,
       verdict,
       compositeScore: computeComposite(scoreResult, depthAnalysis, profile),
@@ -718,6 +752,17 @@ function buildResearch(cat, altData, params, scoreResult, market) {
         longRatio: data.longRatio,
       };
     }
+  }
+
+  // Monte Carlo simulation
+  if (altData?.montecarlo) {
+    r.sources.push("MonteCarlo");
+    r.montecarlo = {
+      mcImplied: altData.montecarlo.mcImplied,
+      method: altData.montecarlo.method,
+      simulations: altData.montecarlo.simulations,
+      stdError: altData.montecarlo.stdError,
+    };
   }
 
   // Economics — FRED
@@ -1109,6 +1154,119 @@ function computeComposite(alpha, depth, network) {
   }
 
   return Math.round(s * 100) / 100;
+}
+
+// ── backtest ──────────────────────────────────────────────
+
+async function cmdBacktest(args) {
+  const limitTotal = parseInt(parseFlag(args, "--limit", "100"), 10);
+  const categoriesStr = parseFlag(args, "--categories", "");
+  const lookbackStr = parseFlag(args, "--lookback", "7,3,1");
+  const categoryFilter = categoriesStr
+    ? new Set(categoriesStr.split(",").map((s) => s.trim().toLowerCase()))
+    : null;
+  const lookbacks = lookbackStr.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => n > 0);
+
+  const scanStart = Date.now();
+
+  // 1. Fetch resolved markets with pagination
+  let allResolved = [];
+  let offset = 0;
+  const pageSize = 100;
+
+  while (allResolved.length < limitTotal) {
+    const batch = await fetchResolved(pageSize, offset);
+    if (batch.length === 0) break;
+    allResolved.push(...batch);
+    offset += pageSize;
+  }
+  allResolved = allResolved.slice(0, limitTotal);
+
+  // 2. Filter by category if requested
+  if (categoryFilter) {
+    allResolved = allResolved.filter((m) => categoryFilter.has(m.category));
+  }
+
+  if (allResolved.length === 0) {
+    out({ error: true, message: "No resolved markets found matching criteria." });
+    return;
+  }
+
+  // 3. Fetch price history for all markets (concurrency 8)
+  const priceHistories = new Map();
+  await mapConcurrent(allResolved, 8, async (market) => {
+    const history = await fetchPriceHistory(market.tokenId);
+    if (history.length > 0) {
+      priceHistories.set(market.conditionId, history);
+    }
+  });
+
+  // 3b. Enrich with PMXT archive (depth-weighted midpoints, hourly resolution)
+  const usePmxt = args.includes("--pmxt");
+  let pmxtEnriched = 0;
+  if (usePmxt) {
+    const maxLookback = Math.max(...lookbacks);
+    let minTs = Infinity, maxTs = 0;
+    for (const m of allResolved) {
+      const closeTs = Math.floor(new Date(m.closedTime).getTime() / 1000);
+      if (isNaN(closeTs)) continue;
+      const evalTs = closeTs - maxLookback * 86400;
+      if (evalTs < minTs) minTs = evalTs;
+      if (closeTs > maxTs) maxTs = closeTs;
+    }
+
+    if (minTs < Infinity) {
+      const pmxt = await fetchPmxtPrices(
+        allResolved.map((m) => ({ conditionId: m.conditionId, tokenId: m.tokenId })),
+        minTs,
+        maxTs,
+      );
+      for (const [cid, pmxtHistory] of pmxt) {
+        if (pmxtHistory.length === 0) continue;
+        const clobHistory = priceHistories.get(cid) || [];
+        priceHistories.set(cid, mergePriceHistories(pmxtHistory, clobHistory));
+        pmxtEnriched++;
+      }
+    }
+  }
+
+  // Filter to only markets with price history
+  const marketsWithHistory = allResolved.filter((m) => priceHistories.has(m.conditionId));
+
+  // 4. Replay signals for each market × lookback (concurrency 4, with rate limiting)
+  const results = [];
+  const workItems = [];
+  for (const market of marketsWithHistory) {
+    for (const lb of lookbacks) {
+      workItems.push({ market, lb });
+    }
+  }
+
+  // Determine if we need rate limiting (crypto markets use CoinGecko)
+  const hasCrypto = marketsWithHistory.some((m) => m.category === "crypto");
+  let requestCount = 0;
+
+  await mapConcurrent(workItems, 4, async ({ market, lb }) => {
+    // Rate limit for CoinGecko (crypto markets)
+    if (market.category === "crypto") {
+      requestCount++;
+      if (requestCount > 1) await sleep(2000);
+    }
+
+    const history = priceHistories.get(market.conditionId);
+    const result = await replaySignal(market, lb, history);
+    if (result) results.push(result);
+  });
+
+  // 5. Analyze
+  const report = analyze(results);
+  report.meta.durationMs = Date.now() - scanStart;
+  report.meta.resolvedFetched = allResolved.length;
+  report.meta.withPriceHistory = marketsWithHistory.length;
+  if (categoryFilter) report.meta.categoryFilter = [...categoryFilter];
+  if (usePmxt) report.meta.pmxtEnriched = pmxtEnriched;
+
+  out(report);
 }
 
 // ── run ────────────────────────────────────────────────────

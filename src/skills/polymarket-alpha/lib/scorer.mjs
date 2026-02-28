@@ -71,6 +71,20 @@ function scoreWeather(market, altData, params, marketPrice) {
     }
   }
 
+  // Monte Carlo implied probability modifier
+  if (altData.montecarlo?.mcImplied != null) {
+    sources.push("montecarlo");
+    const mcImpl = altData.montecarlo.mcImplied;
+    if (impliedProb != null) {
+      // Blend MC estimate at 40% — stratified sampling provides tighter CI
+      impliedProb = impliedProb * 0.60 + mcImpl * 0.40;
+    } else {
+      impliedProb = mcImpl;
+    }
+    confidence = Math.min(0.75, confidence + 0.05);
+    detail += ` MC sim: ${(mcImpl * 100).toFixed(1)}% (${altData.montecarlo.method}).`;
+  }
+
   if (impliedProb === null) {
     if (altData.nws?.periods?.length > 0) {
       return { divergence: 0, direction: "NEUTRAL", confidence: 0.3, alpha: 0,
@@ -203,6 +217,16 @@ function scoreCrypto(market, altData, params, marketPrice) {
         detail += ` Funding: ${(rate * 100).toFixed(3)}%.`;
       }
 
+      // Monte Carlo implied probability modifier
+      if (altData.montecarlo?.mcImplied != null) {
+        sources.push("montecarlo");
+        const mcImpl = altData.montecarlo.mcImplied;
+        // Blend MC estimate at 40% — stratified sampling provides tighter CI
+        impliedProb = impliedProb * 0.60 + mcImpl * 0.40;
+        confidence = Math.min(0.70, confidence + 0.03);
+        detail += ` MC sim: ${(mcImpl * 100).toFixed(1)}% (${altData.montecarlo.method}).`;
+      }
+
       detail = `${coinId}: $${currentPrice.toLocaleString()} (${change24h > 0 ? "+" : ""}${change24h.toFixed(1)}% 24h). Target: ${direction} $${target.toLocaleString()}.` + detail;
       if (daysRemaining !== null) {
         detail += ` Expires: ${daysRemaining}d.`;
@@ -307,6 +331,19 @@ function scoreEconomics(market, altData, params, marketPrice) {
     confidence = 0.55;
   }
 
+  // Monte Carlo implied probability modifier
+  if (altData.montecarlo?.mcImplied != null) {
+    sources.push("montecarlo");
+    const mcImpl = altData.montecarlo.mcImplied;
+    if (impliedProb != null) {
+      impliedProb = impliedProb * 0.60 + mcImpl * 0.40;
+    } else {
+      impliedProb = mcImpl;
+    }
+    confidence = Math.min(0.75, confidence + 0.05);
+    detail += ` MC sim: ${(mcImpl * 100).toFixed(1)}% (${altData.montecarlo.method}).`;
+  }
+
   // Metaculus cross-reference
   const metaculusResult = applyMetaculusModifier(altData, marketPrice, sources, impliedProb);
   if (metaculusResult.applied) {
@@ -406,6 +443,19 @@ function scoreGeopolitics(market, altData, params, marketPrice) {
         confidence = Math.max(confidence, 0.32);
       }
     }
+  }
+
+  // Monte Carlo implied probability
+  if (altData.montecarlo?.mcImplied != null) {
+    sources.push("montecarlo");
+    const mcImpl = altData.montecarlo.mcImplied;
+    if (impliedProb != null) {
+      impliedProb = impliedProb * 0.60 + mcImpl * 0.40;
+    } else {
+      impliedProb = mcImpl;
+    }
+    confidence = Math.min(0.75, confidence + 0.05);
+    details.push(`MC sim: ${(mcImpl * 100).toFixed(1)}% (${altData.montecarlo.method}).`);
   }
 
   // Metaculus cross-reference
@@ -512,6 +562,19 @@ function scoreTech(market, altData, params, marketPrice) {
     }
   }
 
+  // Monte Carlo implied probability
+  if (altData.montecarlo?.mcImplied != null) {
+    sources.push("montecarlo");
+    const mcImpl = altData.montecarlo.mcImplied;
+    if (impliedProb != null) {
+      impliedProb = impliedProb * 0.60 + mcImpl * 0.40;
+    } else {
+      impliedProb = mcImpl;
+    }
+    confidence = Math.min(0.75, confidence + 0.05);
+    details.push(`MC sim: ${(mcImpl * 100).toFixed(1)}% (${altData.montecarlo.method}).`);
+  }
+
   // Metaculus cross-reference
   const metaculusResult = applyMetaculusModifier(altData, marketPrice, sources, impliedProb);
   if (metaculusResult.applied) {
@@ -547,6 +610,15 @@ function scorePoliticsGeneric(market, altData, params, marketPrice) {
   const details = [];
   let impliedProb = null;
   let confidence = 0.25;
+
+  // Monte Carlo implied probability
+  if (altData.montecarlo?.mcImplied != null) {
+    sources.push("montecarlo");
+    const mcImpl = altData.montecarlo.mcImplied;
+    impliedProb = mcImpl;
+    confidence = Math.min(0.75, confidence + 0.05);
+    details.push(`MC sim: ${(mcImpl * 100).toFixed(1)}% (${altData.montecarlo.method}).`);
+  }
 
   // Metaculus is now the primary signal for politics/entertainment
   const metaculusResult = applyMetaculusModifier(altData, marketPrice, sources, impliedProb);

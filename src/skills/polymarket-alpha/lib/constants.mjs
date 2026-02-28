@@ -1,6 +1,7 @@
 // polymarket-alpha constants — API URLs, category keywords, NWS grids
 
 // ── API endpoints ──────────────────────────────────────────
+// No API needed — pure computation (montecarlo source)
 
 export const GAMMA_API = "https://gamma-api.polymarket.com";
 export const DATA_API = "https://data-api.polymarket.com";
@@ -31,6 +32,7 @@ export const TTL = {
   coinglass: 2 * 60_000,
   metaculus: 30 * 60_000,
   trends: 15 * 60_000,
+  montecarlo: 5 * 60_000,
 };
 
 // ── Sports filter (reused from comprehensive-scanner) ──────

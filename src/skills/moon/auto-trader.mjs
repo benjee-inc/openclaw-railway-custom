@@ -29,6 +29,35 @@ async function state() {
   return _state;
 }
 
+// ── Palpha lazy imports (non-fatal if modules unavailable) ──
+
+let _palphaCateg = null;
+let _palphaMatcher = null;
+let _palphaScorer = null;
+let _palphaDepth = null;
+let _palphaNetwork = null;
+
+async function palphaCateg() {
+  if (!_palphaCateg) _palphaCateg = await import("../polymarket-alpha/lib/categorizer.mjs");
+  return _palphaCateg;
+}
+async function palphaMatcher() {
+  if (!_palphaMatcher) _palphaMatcher = await import("../polymarket-alpha/lib/matcher.mjs");
+  return _palphaMatcher;
+}
+async function palphaScorer() {
+  if (!_palphaScorer) _palphaScorer = await import("../polymarket-alpha/lib/scorer.mjs");
+  return _palphaScorer;
+}
+async function palphaDepth() {
+  if (!_palphaDepth) _palphaDepth = await import("../polymarket-alpha/lib/depth.mjs");
+  return _palphaDepth;
+}
+async function palphaNetwork() {
+  if (!_palphaNetwork) _palphaNetwork = await import("../polymarket-alpha/lib/network.mjs");
+  return _palphaNetwork;
+}
+
 // ── Guardrails ───────────────────────────────────────────
 
 const MAX_PER_TRADE = 20;       // $20 USDC
@@ -350,6 +379,276 @@ async function executeTrade(opp) {
   };
 }
 
+// ── Palpha enrichment ────────────────────────────────────
+
+/**
+ * Enrich top scanner opportunities with palpha alt-data scoring and depth analysis.
+ * Non-fatal: errors are logged and raw scores preserved.
+ *
+ * @param {Array} opportunities - Ranked opportunities from evaluateSignals
+ * @param {Array} markets - Raw gamma markets
+ * @param {number} topN - How many top candidates to enrich
+ * @returns {{ enriched: Array, entries: Array }}
+ */
+async function enrichWithPalpha(opportunities, markets, topN = 5) {
+  const entries = [];
+  const startTime = Date.now();
+  const top = opportunities.slice(0, topN);
+
+  if (top.length === 0) return { enriched: opportunities, entries };
+
+  // Build conditionId → market lookup
+  const mktMap = new Map();
+  for (const m of markets) {
+    if (m.conditionId) mktMap.set(m.conditionId, m);
+  }
+
+  // Load palpha modules in parallel
+  const [categ, matcher, scorer, depth] = await Promise.all([
+    palphaCateg(), palphaMatcher(), palphaScorer(), palphaDepth(),
+  ]);
+
+  // Enrich each candidate independently
+  const enrichPromises = top.map(async (opp) => {
+    try {
+      const market = mktMap.get(opp.conditionId);
+      if (!market) return { opp, enriched: false };
+
+      // 1. Categorize
+      const { category } = categ.categorize(market.question || "");
+      const enrichedMarket = { ...market, _category: category };
+
+      // 2. Match + fetch alt data
+      const matchResult = matcher.match(enrichedMarket);
+      const altData = await matcher.fetchAltData(enrichedMarket, matchResult);
+
+      // 3. Score divergence
+      const scoreResult = scorer.score(enrichedMarket, altData, matchResult.params);
+      const rec = scorer.recommendation(scoreResult.alpha, scoreResult.confidence);
+
+      // 4. Depth gate
+      let depthResult = null;
+      const tokenIdx = opp.outcome === "yes" ? 0 : 1;
+      const tokenId = market.clobTokenIds?.[tokenIdx];
+      if (tokenId) {
+        const book = await depth.fetchOrderBook(tokenId);
+        if (book) {
+          depthResult = depth.analyzeDepth(book, market.prices?.[0] || 0.5, scoreResult.direction);
+        }
+      }
+
+      // 5. Apply score multipliers based on recommendation tier
+      const multipliers = { ACTIONABLE: 2.5, NOTABLE: 1.8, MONITOR: 1.0, NOISE: 0.5 };
+      let adjustedScore = opp.score * (multipliers[rec] || 1.0);
+
+      // 6. Direction alignment check
+      const scannerBuyingYes = opp.outcome === "yes";
+      const palphaFavorsYes = scoreResult.direction === "UNDERPRICED_YES";
+      if ((scannerBuyingYes && palphaFavorsYes) || (!scannerBuyingYes && !palphaFavorsYes)) {
+        adjustedScore *= 1.2; // agreement bonus
+      } else if (rec === "ACTIONABLE" || rec === "NOTABLE") {
+        // Strong palpha disagrees with scanner direction → veto
+        return { opp, enriched: true, vetoed: true, reason: `palpha ${rec} disagrees on direction` };
+      }
+
+      // 7. Depth veto
+      if (depthResult && !depthResult.executable) {
+        return { opp, enriched: true, vetoed: true, reason: `depth not executable: ${depthResult.reason}` };
+      }
+
+      // Log per-market palpha result
+      const slippageStr = depthResult?.slippage?.["$100"] != null
+        ? (depthResult.slippage["$100"] * 100).toFixed(2) + "%"
+        : "n/a";
+      entries.push({
+        timestamp: new Date().toISOString(),
+        type: "palpha",
+        message: `[palpha] "${(market.question || "").slice(0, 50)}" cat=${category} rec=${rec} alpha=${(scoreResult.alpha * 100).toFixed(1)}% src=[${scoreResult.sources.join(",")}]${depthResult ? ` depth=${depthResult.depthScore} slippage=${slippageStr}` : ""}`,
+      });
+
+      opp._palphaRec = rec;
+      opp._palphaAlpha = scoreResult.alpha;
+      opp._palphaSources = scoreResult.sources;
+      opp._palphaAdjustedScore = adjustedScore;
+      opp._depthScore = depthResult?.depthScore ?? null;
+      opp._depthSlippage = depthResult?.slippage?.["$100"] ?? null;
+      opp.score = adjustedScore;
+
+      return { opp, enriched: true, vetoed: false };
+    } catch (err) {
+      entries.push({
+        timestamp: new Date().toISOString(),
+        type: "palpha",
+        message: `[palpha] Error enriching "${(opp.question || "").slice(0, 50)}": ${err.message}`,
+      });
+      return { opp, enriched: false };
+    }
+  });
+
+  // Race against 5s timeout
+  const results = await Promise.race([
+    Promise.allSettled(enrichPromises),
+    new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+  ]);
+
+  if (!results) {
+    entries.push({
+      timestamp: new Date().toISOString(),
+      type: "palpha",
+      message: `[palpha] Timeout after 5000ms. Proceeding with raw scores.`,
+    });
+    return { enriched: opportunities, entries };
+  }
+
+  // Merge results
+  let vetoed = 0;
+  let enrichedCount = 0;
+  let errors = 0;
+  const enrichedOpps = [];
+
+  for (const r of results) {
+    if (r.status === "rejected") { errors++; continue; }
+    const { opp, enriched, vetoed: isVetoed, reason } = r.value;
+    if (isVetoed) {
+      vetoed++;
+      entries.push({
+        timestamp: new Date().toISOString(),
+        type: "palpha",
+        message: `[palpha] VETOED: "${(opp.question || "").slice(0, 50)}" — ${reason}`,
+      });
+      continue;
+    }
+    if (enriched) enrichedCount++;
+    else errors++;
+    enrichedOpps.push(opp);
+  }
+
+  // Append remaining non-top opportunities
+  const topIds = new Set(top.map((o) => o.conditionId));
+  for (const opp of opportunities) {
+    if (!topIds.has(opp.conditionId)) enrichedOpps.push(opp);
+  }
+
+  // Re-sort by adjusted score
+  enrichedOpps.sort((a, b) => (b._palphaAdjustedScore || b.score) - (a._palphaAdjustedScore || a.score));
+
+  const elapsed = Date.now() - startTime;
+  entries.push({
+    timestamp: new Date().toISOString(),
+    type: "palpha",
+    message: `[palpha] Enriched ${enrichedCount}/${top.length} candidates in ${elapsed}ms. Vetoed: ${vetoed}. Errors: ${errors}.`,
+  });
+
+  return { enriched: enrichedOpps, entries };
+}
+
+// ── Network violation detection ──────────────────────────
+
+/**
+ * Detect structural arbitrage opportunities via market graph analysis.
+ * Finds threshold monotonicity violations, complement arbs, and correlation divergences.
+ *
+ * @param {Array} markets - Raw gamma markets
+ * @returns {{ opportunities: Array, entries: Array }}
+ */
+async function detectNetworkSignals(markets) {
+  const entries = [];
+  const opportunities = [];
+
+  const net = await palphaNetwork();
+  const categ = await palphaCateg();
+
+  // Categorize markets for graph building
+  const categorized = markets
+    .filter((m) => m.conditionId && m.question && m.prices?.length > 0)
+    .map((m) => {
+      const { category } = categ.categorize(m.question);
+      return { ...m, _category: category };
+    });
+
+  const graph = net.buildGraph(categorized);
+  const violations = net.detectViolations(graph);
+
+  if (violations.length > 0) {
+    entries.push({
+      timestamp: new Date().toISOString(),
+      type: "palpha",
+      message: `[palpha-network] Found ${violations.length} structural violations across ${graph.nodeCount()} markets.`,
+    });
+  }
+
+  // Convert violations to tradeable opportunities
+  for (const v of violations) {
+    if (v.type === "threshold_monotonicity") {
+      // Buy the underpriced lower-threshold market
+      const conditionId = v.markets[0];
+      const market = markets.find((m) => m.conditionId === conditionId);
+      if (!market || market.liquidity < MIN_LIQUIDITY) continue;
+
+      const amount = sizePosition(v.severity * 10000, "flow");
+      if (amount < MIN_TRADE || !canTrade(amount)) continue;
+
+      opportunities.push({
+        conditionId,
+        outcome: "yes",
+        amount,
+        reason: `Network: threshold monotonicity — ${v.detail.slice(0, 120)}`,
+        signalType: "network",
+        score: v.severity * 20000,
+        question: market.question,
+        liquidity: market.liquidity,
+        _palphaRec: "ACTIONABLE",
+      });
+
+    } else if (v.type === "complement_deviation" && v.deviation < -0.03) {
+      // YES+NO < 1.0 — buy the cheaper side (guaranteed arb at resolution)
+      const conditionId = v.markets[0];
+      const market = markets.find((m) => m.conditionId === conditionId);
+      if (!market || market.liquidity < MIN_LIQUIDITY) continue;
+
+      const outcome = v.yesPrice <= v.noPrice ? "yes" : "no";
+      const amount = sizePosition(Math.abs(v.deviation) * 10000, "spread");
+      if (amount < MIN_TRADE || !canTrade(amount)) continue;
+
+      opportunities.push({
+        conditionId,
+        outcome,
+        amount,
+        reason: `Network: complement arb — YES+NO=${((v.yesPrice + v.noPrice) * 100).toFixed(1)}%, buying ${outcome.toUpperCase()} @ ${((outcome === "yes" ? v.yesPrice : v.noPrice) * 100).toFixed(1)}%`,
+        signalType: "network",
+        score: Math.abs(v.deviation) * 15000,
+        question: market.question,
+        liquidity: market.liquidity,
+        _palphaRec: "ACTIONABLE",
+      });
+
+    } else if (v.type === "correlation_divergence") {
+      // Buy the cheaper of two similar markets
+      const [id1, id2] = v.markets;
+      const cheaperId = v.prices[0] < v.prices[1] ? id1 : id2;
+      const market = markets.find((m) => m.conditionId === cheaperId);
+      if (!market || market.liquidity < MIN_LIQUIDITY) continue;
+
+      const amount = sizePosition(v.severity * 5000, "momentum");
+      if (amount < MIN_TRADE || !canTrade(amount)) continue;
+
+      opportunities.push({
+        conditionId: cheaperId,
+        outcome: "yes",
+        amount,
+        reason: `Network: correlation divergence — ${v.detail.slice(0, 120)}`,
+        signalType: "network",
+        score: v.severity * 10000,
+        question: market.question,
+        liquidity: market.liquidity,
+        _palphaRec: "NOTABLE",
+      });
+    }
+  }
+
+  return { opportunities, entries };
+}
+
 // ── Main entry point (called by scanner each cycle) ──────
 
 /**
@@ -378,7 +677,26 @@ export async function processSignals({ markets, signals, tradeFlows }) {
   }
 
   // Evaluate and rank opportunities
-  const opportunities = evaluateSignals(signals, tradeFlows, markets);
+  const rawOpportunities = evaluateSignals(signals, tradeFlows, markets);
+
+  // Palpha enrichment (non-fatal)
+  let opportunities = rawOpportunities;
+  let palphaEntries = [];
+  try {
+    const result = await enrichWithPalpha(rawOpportunities, markets, 5);
+    opportunities = result.enriched;
+    palphaEntries = result.entries;
+  } catch { opportunities = rawOpportunities; }
+
+  // Network violations (non-fatal)
+  try {
+    const { opportunities: netOpps, entries: netEntries } = await detectNetworkSignals(markets);
+    opportunities.push(...netOpps);
+    palphaEntries.push(...netEntries);
+    opportunities.sort((a, b) => (b._palphaAdjustedScore || b.score) - (a._palphaAdjustedScore || a.score));
+  } catch {}
+
+  entries.push(...palphaEntries);
 
   if (opportunities.length === 0) {
     entries.push({
@@ -407,10 +725,20 @@ export async function processSignals({ markets, signals, tradeFlows }) {
         markTraded(opp.conditionId);
         _cycleTradeCount++;
 
+        // Build enhanced log message with palpha context
+        let logMsg = `[auto-trader] EXECUTED: ${result.outcome} $${result.amount} on "${result.question.slice(0, 50)}" @ ${(result.entryPrice * 100).toFixed(1)}% | ${result.reason}`;
+        if (opp._palphaRec) {
+          logMsg += ` | palpha=${opp._palphaRec} alpha=${(opp._palphaAlpha * 100).toFixed(1)}% src=[${(opp._palphaSources || []).join(",")}]`;
+        }
+        if (opp._depthScore != null) {
+          logMsg += ` | depth=${opp._depthScore} slippage=${opp._depthSlippage != null ? (opp._depthSlippage * 100).toFixed(2) + "%" : "n/a"}`;
+        }
+        logMsg += ` | order=${result.orderId || "n/a"}`;
+
         entries.push({
           timestamp: new Date().toISOString(),
           type: "trade",
-          message: `[auto-trader] EXECUTED: ${result.outcome} $${result.amount} on "${result.question.slice(0, 50)}" @ ${(result.entryPrice * 100).toFixed(1)}% | ${result.reason} | order=${result.orderId || "n/a"}`,
+          message: logMsg,
         });
 
         console.log(`[auto-trader] Trade executed: ${result.orderId} — ${result.outcome} $${result.amount} @ ${result.entryPrice}`);
