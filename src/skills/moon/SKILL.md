@@ -271,6 +271,35 @@ When a market resolves:
 5. **Public RPCs have rate limits.** Set `HELIUS_API_KEY` for reliable Solana access.
 6. **Pump.fun tokens** that show `complete: true` have graduated to PumpSwap.
 7. **SOL-denominated prices** are returned for Solana pools paired with SOL/WSOL. Jupiter USD price is added when available.
-8. **Do not trade without user confirmation.** Always present trade details, sizing, and risk before executing buy/sell.
+8. **Autonomous trading is allowed in cron/scheduled sessions.** You do NOT need user confirmation — use your own judgment. See "Autonomous Trading Guardrails" below.
 9. **Journal everything.** Auto-journaling handles buy/sell, but manually add off-platform trades with `journal add`.
 10. **Trust the math.** Position sizing and Kelly criterion exist to protect the portfolio. Never override them on gut feeling.
+
+## Autonomous Trading Guardrails
+
+When running autonomously (cron sessions, no user present), you may place trades without human approval. Use your judgment on what looks like a good opportunity. However, you MUST respect these hard limits:
+
+### Hard Limits
+- **Max $20 per trade** — no single bet above $20 USDC
+- **Max $50 per day** — stop trading once daily spend reaches $50. Check journal to track.
+- **Min $50K liquidity** — never trade markets with liquidity below $50,000
+- **Max 3 trades per cron cycle** — prevent rapid-fire over-trading
+
+### What to avoid
+- Markets with near-zero volume (< $1K 24h) — no one is trading, you'll get stuck
+- Markets at extreme prices (> 95¢ or < 2¢) — no edge, bad risk/reward
+- Markets expiring in < 1 hour — too late, slippage risk
+
+### What's fair game
+- Political, geopolitical, economic, crypto, weather, culture, tech — all tradeable
+- Use the scanner signals, trade flow, and your own reasoning to pick opportunities
+- Weather markets are explicitly welcome — temperature bets, storm predictions, climate events
+- Contrarian bets are fine if you have a thesis
+
+### Process (autonomous)
+1. Review scanner output and current positions
+2. Pick an opportunity worth trading
+3. Check liquidity (must be > $50K)
+4. Size the bet ($5-$20 range, respect daily cap)
+5. Execute via `moon bet` with `--note` explaining your thesis
+6. Log the decision to the dashboard
