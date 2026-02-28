@@ -104,9 +104,6 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod --frozen-lockfile && pnpm store prune
 
-# Install auto-trader dependencies locally (global npm installs aren't resolvable by ESM imports in /app)
-RUN cd /app && npm install --save "@solana/web3.js@^1" ethers@5 @polymarket/clob-client viem
-
 # Copy built openclaw
 COPY --from=openclaw-build /openclaw /openclaw
 
@@ -139,6 +136,9 @@ USER root
 
 # ── OpenClaw Skills: npm CLI tools ──
 RUN npm install -g @steipete/summarize @steipete/bird clawhub mcporter twitter-api-v2 @blockrun/clawrouter viem "@solana/web3.js@^1" @polymarket/clob-client ethers@5
+
+# Make globally installed packages resolvable by ESM imports in /app (auto-trader needs these)
+ENV NODE_PATH="/usr/local/lib/node_modules"
 
 # Install custom skill CLIs
 RUN chmod +x /app/src/skills/x-api/x-api.mjs \
