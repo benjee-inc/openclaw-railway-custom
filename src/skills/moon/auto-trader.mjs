@@ -13,12 +13,21 @@
  *   - No closed/inactive markets
  */
 
-import {
-  getMarket, placeBet, placeLimitBet,
-} from "./lib/polymarket.mjs";
-import {
-  addPolyBet, getPolyBets, addJournalEntry, addNarrative, loadState,
-} from "./lib/state.mjs";
+// Lazy imports — these modules pull in @solana/web3.js etc. which aren't
+// available in the server.js process. We import them dynamically only when
+// actually executing a trade (not at module load time).
+let _poly = null;
+let _state = null;
+
+async function poly() {
+  if (!_poly) _poly = await import("./lib/polymarket.mjs");
+  return _poly;
+}
+
+async function state() {
+  if (!_state) _state = await import("./lib/state.mjs");
+  return _state;
+}
 
 // ── Guardrails ───────────────────────────────────────────
 
@@ -242,7 +251,8 @@ function markTraded(conditionId) {
 
 // ── Also skip markets we already hold ────────────────────
 
-function isAlreadyHeld(conditionId) {
+async function isAlreadyHeld(conditionId) {
+  const { getPolyBets } = await state();
   const bets = getPolyBets({ conditionId, status: "open" });
   return bets.length > 0;
 }
@@ -250,6 +260,9 @@ function isAlreadyHeld(conditionId) {
 // ── Execute trade ────────────────────────────────────────
 
 async function executeTrade(opp) {
+  const { getMarket, placeBet, placeLimitBet } = await poly();
+  const { addPolyBet, addJournalEntry, addNarrative } = await state();
+
   // Fetch fresh market data
   const market = await getMarket(opp.conditionId);
 
@@ -383,7 +396,7 @@ export async function processSignals({ markets, signals, tradeFlows }) {
 
     // Skip recently traded or already held markets
     if (isRecentlyTraded(opp.conditionId)) continue;
-    if (isAlreadyHeld(opp.conditionId)) continue;
+    if (await isAlreadyHeld(opp.conditionId)) continue;
 
     try {
       console.log(`[auto-trader] Executing: ${opp.signalType} — ${opp.question} — ${opp.outcome} $${opp.amount}`);
@@ -432,14 +445,18 @@ export async function processSignals({ markets, signals, tradeFlows }) {
 
 // ── Status ───────────────────────────────────────────────
 
-export function getAutoTraderStatus() {
+export async function getAutoTraderStatus() {
   const d = dailyTracker();
-  const openBets = getPolyBets({ status: "open" });
+  let openCount = 0;
+  try {
+    const { getPolyBets } = await state();
+    openCount = getPolyBets({ status: "open" }).length;
+  } catch { /* state not available yet */ }
   return {
     dailySpend: d.amount,
     dailyLimit: MAX_PER_DAY,
     dailyTrades: d.trades,
-    openPositions: openBets.length,
+    openPositions: openCount,
     recentlyTraded: recentTrades.size,
   };
 }
