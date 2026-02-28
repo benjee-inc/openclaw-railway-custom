@@ -9,7 +9,19 @@
  * Pushes JSONL entries to GitHub Pages dashboard repo every cycle.
  */
 
-import { processSignals as runAutoTrader } from "./auto-trader.mjs";
+// Auto-trader loaded lazily to avoid pulling moon-lib dependency chain at startup
+let _autoTrader = null;
+async function getAutoTrader() {
+  if (!_autoTrader) {
+    try {
+      _autoTrader = await import("./auto-trader.mjs");
+    } catch (err) {
+      console.error(`[scanner] auto-trader import failed: ${err.message}`);
+      _autoTrader = { processSignals: async () => [] };
+    }
+  }
+  return _autoTrader;
+}
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 const DATA_API = "https://data-api.polymarket.com";
@@ -566,7 +578,8 @@ async function runScanCycle() {
     const autoTraderEnabled = env("AUTO_TRADER_ENABLED", "true").toLowerCase() !== "false";
     if (autoTraderEnabled && env("POLYMARKET_PRIVATE_KEY")) {
       try {
-        tradeEntries = await runAutoTrader({ markets, signals, tradeFlows });
+        const { processSignals } = await getAutoTrader();
+        tradeEntries = await processSignals({ markets, signals, tradeFlows });
       } catch (err) {
         console.error(`[auto-trader] cycle error: ${err.message}`);
         tradeEntries = [{ timestamp: iso(), type: "trade", message: `[auto-trader] Error: ${err.message}` }];
