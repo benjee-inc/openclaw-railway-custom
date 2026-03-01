@@ -283,7 +283,16 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
 
       // 8. Hard gate: only ACTIONABLE/NOTABLE pass through
       if (rec !== "ACTIONABLE" && rec !== "NOTABLE") {
-        return { opp, enriched: true, vetoed: true, reason: `palpha rec=${rec} — below threshold` };
+        const alphaPct = (scoreResult.alpha * 100).toFixed(1);
+        const confPct = ((scoreResult.confidence || 0) * 100).toFixed(0);
+        const srcList = (scoreResult.sources || []).join(",");
+        const mktPct = ((market.prices?.[0] || 0) * 100).toFixed(1);
+        const implied = scoreResult.altDataImplied != null ? (scoreResult.altDataImplied * 100).toFixed(1) + "%" : "n/a";
+        const dir = scoreResult.direction || "?";
+        const needs = rec === "MONITOR"
+          ? `needs alpha≥8%+conf≥35% for NOTABLE`
+          : `needs alpha≥3% for MONITOR`;
+        return { opp, enriched: true, vetoed: true, reason: `rec=${rec} alpha=${alphaPct}% conf=${confPct}% | mkt=${mktPct}% implied=${implied} dir=${dir} src=[${srcList}] | ${needs}` };
       }
 
       opp._palphaRec = rec;
@@ -541,10 +550,11 @@ async function executeTrade(opp) {
 
 // ── Main CLI command ─────────────────────────────────────
 
-export async function cmdAutoTrade(args) {
+export async function cmdAutoTrade(args, opts = {}) {
   const dryRun = hasFlag(args, "--dry-run");
   const budgetOverride = parseFlag(args, "--budget", null);
   const maxTradesOverride = parseFlag(args, "--max-trades", null);
+  const skipDashboardPush = opts.skipDashboardPush || false;
 
   const maxDay = budgetOverride ? Number(budgetOverride) : MAX_PER_DAY;
   const maxTrades = maxTradesOverride ? Number(maxTradesOverride) : MAX_TRADES_PER_INVOCATION;
@@ -560,25 +570,28 @@ export async function cmdAutoTrade(args) {
   const staleAfter = signalData.staleAfterMs || DEFAULT_STALE_MS;
   if (age > staleAfter) {
     const msg = `Signals stale: ${(age / 1000).toFixed(0)}s old (max ${(staleAfter / 1000).toFixed(0)}s)`;
-    await pushToDashboard([{ timestamp: new Date().toISOString(), type: "palpha", message: `[auto-trade] ${msg}` }]);
-    return out({ error: true, message: msg, cycle: signalData.cycle, tradesExecuted: [], skipped: [] });
+    const entries = [{ timestamp: new Date().toISOString(), type: "palpha", message: `[auto-trade] ${msg}` }];
+    if (!skipDashboardPush) await pushToDashboard(entries);
+    return out({ error: true, message: msg, cycle: signalData.cycle, tradesExecuted: [], skipped: [], dashEntries: skipDashboardPush ? entries : undefined });
   }
 
   // 3. Check if we already processed this cycle
   const atState = getAutoTraderState();
   if (signalData.cycle && atState.lastCycle === signalData.cycle) {
-    await pushToDashboard([{ timestamp: new Date().toISOString(), type: "palpha", message: `[auto-trade] Cycle ${signalData.cycle} already processed. Waiting for next scanner cycle. Daily: $${atState.dailySpend.toFixed(2)}` }]);
+    const entries = [{ timestamp: new Date().toISOString(), type: "palpha", message: `[auto-trade] Cycle ${signalData.cycle} already processed. Waiting for next scanner cycle. Daily: $${atState.dailySpend.toFixed(2)}` }];
+    if (!skipDashboardPush) await pushToDashboard(entries);
     return out({
       message: `Cycle ${signalData.cycle} already processed. Waiting for next scanner cycle.`,
-      tradesExecuted: [], skipped: [], dailySpend: atState.dailySpend,
+      tradesExecuted: [], skipped: [], dailySpend: atState.dailySpend, dashEntries: skipDashboardPush ? entries : undefined,
     });
   }
 
   // 4. Check daily budget
   if (atState.dailySpend >= maxDay) {
     const msg = `Daily limit reached: $${atState.dailySpend.toFixed(2)}/$${maxDay}`;
-    await pushToDashboard([{ timestamp: new Date().toISOString(), type: "palpha", message: `[auto-trade] ${msg}` }]);
-    return out({ message: msg, tradesExecuted: [], skipped: [], dailySpend: atState.dailySpend });
+    const entries = [{ timestamp: new Date().toISOString(), type: "palpha", message: `[auto-trade] ${msg}` }];
+    if (!skipDashboardPush) await pushToDashboard(entries);
+    return out({ message: msg, tradesExecuted: [], skipped: [], dailySpend: atState.dailySpend, dashEntries: skipDashboardPush ? entries : undefined });
   }
 
   // 5. Prune expired cooldowns
@@ -687,7 +700,7 @@ export async function cmdAutoTrade(args) {
   } else if (tradesExecuted.length === 0 && skipped.length === 0) {
     dashEntries.push({ timestamp: iso(), type: "palpha", message: `[auto-trade] Cycle ${signalData.cycle || "?"}: ${rawOpportunities.length} raw opps, ${opportunities.length} after enrichment, ${palphaVetoed} vetoed. No actionable trades. Daily: $${currentSpend.toFixed(2)}/$${maxDay}` });
   }
-  await pushToDashboard(dashEntries);
+  if (!skipDashboardPush) await pushToDashboard(dashEntries);
 
   // 12. Output
   const finalState = getAutoTraderState();
@@ -703,5 +716,6 @@ export async function cmdAutoTrade(args) {
     dailyTrades: finalState.dailyTrades,
     dailyLimit: maxDay,
     log,
+    dashEntries: skipDashboardPush ? dashEntries : undefined,
   });
 }
