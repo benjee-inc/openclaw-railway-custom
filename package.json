@@ -11,9 +11,13 @@
     "lint": "node -c src/server.js"
   },
   "dependencies": {
+    "@polymarket/clob-client": "^5.2.1",
+    "@solana/web3.js": "^1",
+    "ethers": "^5",
     "express": "^5.1.0",
     "http-proxy": "^1.18.1",
     "node-pty": "^1.0.0",
+    "viem": "^2",
     "ws": "^8.18.0"
   },
   "pnpm": {

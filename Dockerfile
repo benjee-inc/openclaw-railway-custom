@@ -137,9 +137,8 @@ USER root
 # ── OpenClaw Skills: npm CLI tools ──
 RUN npm install -g @steipete/summarize @steipete/bird clawhub mcporter twitter-api-v2 viem "@solana/web3.js@^1" @polymarket/clob-client ethers@5
 
-# Install moon-lib deps locally so ESM imports resolve from /app/node_modules
-# (NODE_PATH doesn't work with ESM — only CommonJS respects it)
-RUN cd /app && npm install --save "@solana/web3.js@^1" ethers@5 @polymarket/clob-client viem 2>/dev/null || true
+# moon-lib deps (ethers, viem, clob-client, solana) are now in package.json
+# and installed by pnpm on line 105 — no separate npm install needed
 
 # Install custom skill CLIs
 RUN chmod +x /app/src/skills/x-api/x-api.mjs \
