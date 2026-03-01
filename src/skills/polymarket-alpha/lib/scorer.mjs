@@ -899,7 +899,9 @@ function applyGrokModifier(altData, marketPrice, sources, currentImplied) {
     newImplied = grokProb;
   }
 
-  const detail = ` Grok: ${(grokProb * 100).toFixed(0)}% (${grok.confidence}). ${grok.reasoning || ""}`;
+  const signals = grok.keySignals?.length > 0 ? ` Signals: ${grok.keySignals.slice(0, 3).join("; ")}.` : "";
+  const comparison = grok.marketComparison ? ` vs Market: ${grok.marketComparison}` : "";
+  const detail = ` Grok: ${(grokProb * 100).toFixed(0)}% (${grok.confidence}). ${grok.reasoning || ""}${signals}${comparison}`;
   return { applied: true, impliedProb: newImplied, confidenceBoost, detail };
 }
 

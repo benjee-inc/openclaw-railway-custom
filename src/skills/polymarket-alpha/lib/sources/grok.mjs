@@ -35,10 +35,20 @@ export async function analyzeMarket(question, category, marketPrice) {
           {
             role: "system",
             content:
-              "You are Grok, doing high-signal analysis for prediction markets. " +
-              "Use X posts and web search to assess the current probability of the following market question resolving YES. " +
-              "Cross-reference latest X posts, news, and real-time data. " +
-              'Output ONLY valid JSON: {"probability": <0-1>, "confidence": "high"|"medium"|"low", "reasoning": "<1-2 sentences>"}',
+              "You are Grok, an elite high-signal forecaster specialized in prediction markets and real-time event probability assessment.\n\n" +
+              "Task: Determine the most accurate probability (0.00–1.00) that the market question resolves YES. Use x_search and web_search tools aggressively and in parallel before reasoning.\n\n" +
+              "Mandatory internal process (always follow):\n" +
+              "1. Immediately search for the latest data (focus on last 24–72 hours, key accounts, official statements, news, on-the-ground reports).\n" +
+              "2. Actively gather evidence for BOTH YES and NO outcomes.\n" +
+              "3. Evaluate source credibility, timing, resolution criteria, base rates, and edge cases.\n" +
+              "4. Identify major upcoming catalysts and risks.\n" +
+              "5. Compare your independent view to the current market price and note any crowd over/under-reaction.\n\n" +
+              "Output ONLY a single valid JSON object. No other text, no markdown, no explanations.\n\n" +
+              '{"probability": 0.XX, "confidence": "high"|"medium"|"low", "reasoning": "3–6 sentence high-signal synthesis of the strongest evidence, your logic, and why you chose this number", ' +
+              '"key_signals": ["bullet 1", "bullet 2", "bullet 3", "bullet 4"], ' +
+              '"market_comparison": "One sentence on how/why your probability differs from the current market price", ' +
+              '"major_catalysts": ["near-term catalyst 1", "catalyst 2"], ' +
+              '"major_risks": ["biggest risk 1", "risk 2"]}',
           },
           {
             role: "user",
@@ -58,7 +68,7 @@ export async function analyzeMarket(question, category, marketPrice) {
     if (!content) return null;
 
     // Extract JSON from response (may be wrapped in markdown code block)
-    const jsonMatch = content.match(/\{[\s\S]*?\}/);
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
 
     const parsed = JSON.parse(jsonMatch[0]);
@@ -67,7 +77,11 @@ export async function analyzeMarket(question, category, marketPrice) {
     const result = {
       probability: Math.max(0, Math.min(1, Number(parsed.probability))),
       confidence: ["high", "medium", "low"].includes(parsed.confidence) ? parsed.confidence : "low",
-      reasoning: String(parsed.reasoning || "").slice(0, 200),
+      reasoning: String(parsed.reasoning || "").slice(0, 400),
+      keySignals: Array.isArray(parsed.key_signals) ? parsed.key_signals.slice(0, 6) : [],
+      marketComparison: String(parsed.market_comparison || "").slice(0, 200),
+      majorCatalysts: Array.isArray(parsed.major_catalysts) ? parsed.major_catalysts.slice(0, 4) : [],
+      majorRisks: Array.isArray(parsed.major_risks) ? parsed.major_risks.slice(0, 4) : [],
     };
 
     cache.set(cacheKey, result, TTL.grok);
