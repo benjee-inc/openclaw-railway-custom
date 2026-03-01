@@ -19,7 +19,7 @@ const CLOB_API = "https://clob.polymarket.com";
 const DEFAULT_INTERVAL_MS = 300_000;
 const DEFAULT_REPO = "benjee-inc/polymarket-arb-dashboard";
 const JSONL_PATH = "logs/terminal.jsonl";
-const STATE_PATH = "state.json";
+
 const MAX_ENTRIES = 200;
 
 let intervalId = null;
@@ -594,8 +594,6 @@ function writeSignalsToFile(markets, signals, tradeFlows, midShifts) {
 
 // ── Polygon USDC balance ─────────────────────────────────
 
-const POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com";
-const POLY_USDC_ADDR = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // USDC on Polygon (6 decimals)
 
 let _walletAddress = null;
 async function getWalletAddress() {
@@ -647,33 +645,6 @@ async function getWalletAddress() {
   }
 }
 
-async function fetchPolygonUsdcBalance() {
-  const address = await getWalletAddress();
-  if (!address) return null;
-  try {
-    // balanceOf(address) selector = 0x70a08231, padded address
-    const paddedAddr = address.slice(2).toLowerCase().padStart(64, "0");
-    const data = "0x70a08231" + paddedAddr;
-    const res = await fetch(POLYGON_RPC, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0", id: 1, method: "eth_call",
-        params: [{ to: POLY_USDC_ADDR, data }, "latest"],
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const json = await res.json();
-    if (json.result) {
-      const raw = BigInt(json.result);
-      return Number(raw) / 1e6; // USDC has 6 decimals
-    }
-    return null;
-  } catch (err) {
-    console.error(`[scanner] USDC balance fetch failed: ${err.message}`);
-    return null;
-  }
-}
 
 // ── Auto-sell: take profit + stop loss ────────────────────
 
@@ -767,151 +738,6 @@ async function autoTakeProfit() {
   return entries;
 }
 
-// ── State sync to GitHub ─────────────────────────────────
-
-async function fetchOnChainPositions() {
-  const address = await getWalletAddress();
-  if (!address) return [];
-  try {
-    const res = await fetch(
-      `${DATA_API}/positions?user=${address}`,
-      { signal: AbortSignal.timeout(10_000) },
-    );
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
-  } catch (err) {
-    console.error(`[scanner] on-chain positions fetch failed: ${err.message}`);
-    return [];
-  }
-}
-
-function transformStateForDashboard(onChainPositions, walletBalance, previousState) {
-  // Use actual on-chain positions as source of truth (not local state.json)
-  const bets = onChainPositions.map(p => {
-    const size = parseFloat(p.size || p.amount || 0);
-    const avgPrice = parseFloat(p.avgPrice || p.price || 0);
-    const cost = size * avgPrice;
-    return {
-      conditionId: p.conditionId || p.asset,
-      tokenId: p.asset,
-      market: p.title || p.question || p.market || "Unknown",
-      side: p.outcome || "YES",
-      price: avgPrice,
-      amount: parseFloat(cost.toFixed(2)),
-      shares: size,
-      source: "bot",
-      timestamp: p.timestamp || new Date().toISOString(),
-    };
-  });
-
-  // Build livePositions with current value vs cost basis
-  const livePositions = onChainPositions.map(p => {
-    const size = parseFloat(p.size || p.amount || 0);
-    const avgPrice = parseFloat(p.avgPrice || p.price || 0);
-    const curPrice = parseFloat(p.curPrice || p.currentPrice || avgPrice);
-    const cost = size * avgPrice;
-    const currentValue = size * curPrice;
-    const pnl = currentValue - cost;
-    const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
-    return {
-      market: p.title || p.question || p.market || "Unknown",
-      side: p.outcome || "YES",
-      price: avgPrice,
-      amount: parseFloat(cost.toFixed(2)),
-      shares: size,
-      livePrice: curPrice,
-      livePnl: parseFloat(pnl.toFixed(3)),
-      livePnlPct: parseFloat(pnlPct.toFixed(2)),
-      hoursHeld: 0,
-      conditionId: p.conditionId || p.asset,
-    };
-  });
-
-  // Detect closed positions by diffing with previous state
-  const prevBets = previousState?.bets || [];
-  const prevClosed = previousState?.closedBets || [];
-  const currentTokenIds = new Set(bets.map(b => b.tokenId));
-
-  const newlyClosed = [];
-  for (const prev of prevBets) {
-    if (!currentTokenIds.has(prev.tokenId)) {
-      // Position gone from on-chain = closed/sold
-      // Use last known live price as exit price
-      const prevLive = (previousState?.livePositions || []).find(lp => lp.conditionId === prev.conditionId);
-      const exitPrice = prevLive?.livePrice || prev.price;
-      const proceeds = prev.shares * exitPrice;
-      const pnl = proceeds - prev.amount;
-      newlyClosed.push({
-        ...prev,
-        exitPrice,
-        pnl: parseFloat(pnl.toFixed(3)),
-        exitReason: "manual close",
-        closedAt: new Date().toISOString(),
-      });
-    }
-  }
-
-  // Merge with previously tracked closed bets (cap at 100)
-  const closedBets = [...prevClosed, ...newlyClosed].slice(-100);
-  const realizedPnl = parseFloat(closedBets.reduce((s, b) => s + (b.pnl || 0), 0).toFixed(3));
-
-  const deployed = bets.reduce((s, b) => s + (b.amount || 0), 0);
-
-  return {
-    bankroll: walletBalance != null ? walletBalance : 0,
-    bets,
-    closedBets,
-    livePositions,
-    deployed,
-    realizedPnl,
-    scanCount: cycleCount,
-    lastUpdate: new Date().toISOString(),
-  };
-}
-
-async function pushStateToGithub(token, repo) {
-  // Fetch real on-chain positions + wallet balance (source of truth, not local state)
-  const [onChainPositions, walletBalance] = await Promise.all([
-    fetchOnChainPositions(),
-    fetchPolygonUsdcBalance(),
-  ]);
-
-  const url = `https://api.github.com/repos/${repo}/contents/${STATE_PATH}`;
-
-  // Get existing state + sha (for closed position tracking and atomic update)
-  let sha = null;
-  let previousState = null;
-  try {
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json" },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      sha = data.sha;
-      try {
-        previousState = JSON.parse(Buffer.from(data.content, "base64").toString("utf-8"));
-      } catch {}
-    }
-  } catch {}
-
-  const dashState = transformStateForDashboard(onChainPositions, walletBalance, previousState);
-
-  const content = Buffer.from(JSON.stringify(dashState, null, 2)).toString("base64");
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json", "Content-Type": "application/json" },
-    body: JSON.stringify({ message: `state sync: cycle ${cycleCount}`, content, ...(sha ? { sha } : {}) }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`GitHub state PUT ${res.status}: ${text.slice(0, 200)}`);
-  }
-  const closedCount = dashState.closedBets?.length || 0;
-  console.log(`[scanner] state synced → ${onChainPositions.length} positions, ${closedCount} closed, deployed=$${dashState.deployed.toFixed(2)}, realized=$${dashState.realizedPnl.toFixed(2)}, balance=$${(walletBalance ?? 0).toFixed(2)}`);
-}
 
 // ── Scan cycle ───────────────────────────────────────────
 
@@ -996,12 +822,6 @@ async function runScanCycle() {
     console.error(`[scanner] GitHub push error: ${err.message}`);
   }
 
-  // Sync portfolio state to GitHub (every cycle)
-  try {
-    await pushStateToGithub(token, repo);
-  } catch (err) {
-    console.error(`[scanner] state sync error: ${err.message}`);
-  }
 }
 
 // ── Public API ───────────────────────────────────────────
