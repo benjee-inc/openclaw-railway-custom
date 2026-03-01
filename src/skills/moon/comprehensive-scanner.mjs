@@ -244,6 +244,7 @@ async function fetchGammaMarkets() {
         allMarkets.push({
           question: m.question || event.title,
           conditionId: m.conditionId,
+          eventSlug: event.slug || null,
           tokenId: tokenIds[0] || null,
           prices: prices.map(Number),
           outcomes: tryJSON(m.outcomes) || [],
@@ -259,6 +260,7 @@ async function fetchGammaMarkets() {
           change1d: m.oneDayPriceChange != null ? Number(m.oneDayPriceChange) : null,
           change1w: m.oneWeekPriceChange != null ? Number(m.oneWeekPriceChange) : null,
           competitive: Number(event.competitive || 0),
+          clobTokenIds: tokenIds,
         });
       }
     }
@@ -673,6 +675,98 @@ async function fetchPolygonUsdcBalance() {
   }
 }
 
+// ── Auto-sell: take profit + stop loss ────────────────────
+
+const TAKE_PROFIT_PCT = 200;  // sell when position is up 200%+
+const STOP_LOSS_PCT = -30;    // sell when position is down 30%+
+const MIN_EXIT_PRICE = 0.005; // never sell below 0.5¢ — better to let it expire worthless than give away shares
+
+async function autoTakeProfit() {
+  const address = await getWalletAddress();
+  if (!address) return [];
+  const entries = [];
+
+  try {
+    const res = await fetch(
+      `${DATA_API}/positions?user=${address}`,
+      { signal: AbortSignal.timeout(10_000) },
+    );
+    if (!res.ok) return [];
+    const positions = await res.json();
+    if (!Array.isArray(positions)) return [];
+
+    const { getMarket, placeBet } = await import("./lib/polymarket.mjs");
+
+    for (const p of positions) {
+      const pnlPct = parseFloat(p.percentPnl || 0);
+      const size = parseFloat(p.size || 0);
+      const curPrice = parseFloat(p.curPrice || 0);
+      if (size <= 0 || curPrice <= 0) continue;
+
+      // Determine if we should sell: take profit OR stop loss
+      const isTakeProfit = pnlPct >= TAKE_PROFIT_PCT;
+      const isStopLoss = pnlPct <= STOP_LOSS_PCT;
+      if (!isTakeProfit && !isStopLoss) continue;
+
+      // Never sell too cheap — if price is below MIN_EXIT_PRICE, the spread
+      // will eat most of the proceeds. Better to hold and let it resolve.
+      if (curPrice < MIN_EXIT_PRICE) {
+        entries.push({
+          timestamp: new Date().toISOString(),
+          type: "palpha",
+          message: `[auto-sell] SKIP: "${(p.title || "").slice(0, 55)}" price ${(curPrice * 100).toFixed(1)}¢ below min exit ${(MIN_EXIT_PRICE * 100).toFixed(1)}¢ — holding to expiry`,
+        });
+        continue;
+      }
+
+      const cid = p.conditionId;
+      const title = (p.title || "").slice(0, 55);
+      const outcome = (p.outcome || "Yes").toLowerCase();
+      const sellReason = isTakeProfit ? "TAKE PROFIT" : "STOP LOSS";
+
+      try {
+        const market = await getMarket(cid);
+        if (market.closed) continue;
+
+        const tokenIdx = outcome === "yes" ? 0 : 1;
+        const tokenId = market.clobTokenIds?.[tokenIdx];
+        if (!tokenId) continue;
+
+        // Check spread before selling — don't sell into a wide spread
+        const mktSpread = market.spread || 0;
+        if (curPrice > 0 && mktSpread > 0 && (mktSpread / curPrice) > 0.15) {
+          entries.push({
+            timestamp: new Date().toISOString(),
+            type: "palpha",
+            message: `[auto-sell] SKIP: "${title}" spread too wide for exit (${(mktSpread * 100).toFixed(1)}¢ on ${(curPrice * 100).toFixed(1)}¢ = ${((mktSpread / curPrice) * 100).toFixed(0)}%) — waiting for tighter spread`,
+          });
+          continue;
+        }
+
+        const result = await placeBet(tokenId, "SELL", size, market.negRisk, market.tickSize);
+
+        if (result.success) {
+          const proceeds = parseFloat(result.takingAmount || 0);
+          console.log(`[auto-sell] ${sellReason}: "${title}" — ${size.toFixed(1)} shares @ ${curPrice} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(0)}%) → $${proceeds.toFixed(2)}`);
+          entries.push({
+            timestamp: new Date().toISOString(),
+            type: "trade",
+            message: `[auto-sell] ${sellReason}: Sold ${outcome.toUpperCase()} ${size.toFixed(1)} shares of "${title}" @ ${(curPrice * 100).toFixed(1)}¢ (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(0)}%) → $${proceeds.toFixed(2)} | order=${result.orderId}`,
+          });
+        }
+      } catch (err) {
+        console.error(`[auto-sell] failed "${title}": ${err.message}`);
+      }
+
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  } catch (err) {
+    console.error(`[auto-sell] error: ${err.message}`);
+  }
+
+  return entries;
+}
+
 // ── State sync to GitHub ─────────────────────────────────
 
 async function fetchOnChainPositions() {
@@ -882,11 +976,19 @@ async function runScanCycle() {
     newEntries = [entry("scan", `Error: ${err.message}`)];
   }
 
-  // Push to GitHub (scanner + auto-trade entries combined — single write to avoid SHA race)
+  // Auto-sell positions that hit profit target
+  let profitEntries = [];
+  try {
+    profitEntries = await autoTakeProfit();
+  } catch (err) {
+    console.error(`[scanner] auto-sell error: ${err.message}`);
+  }
+
+  // Push to GitHub (scanner + auto-trade + auto-sell entries combined — single write to avoid SHA race)
   try {
     const { sha, entries: existing } = await getExistingJsonl(token, repo);
     const parsedNew = newEntries.map((e) => typeof e === "string" ? JSON.parse(e) : e);
-    const combined = [...existing, ...autoTradeEntries, ...parsedNew];
+    const combined = [...existing, ...autoTradeEntries, ...profitEntries, ...parsedNew];
     const trimmed = combined.slice(-MAX_ENTRIES);
     await pushJsonl(token, repo, sha, trimmed);
     console.log(`[scanner] pushed ${newEntries.length} scan + ${autoTradeEntries.length} trade entries (total: ${trimmed.length})`);

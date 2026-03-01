@@ -1,6 +1,15 @@
 // moon/lib/constants.mjs -- Addresses, ABIs, RPC URLs, API bases
 
-import { parseAbi } from "viem";
+// Lazy-load viem — allows this module to be imported even when viem isn't
+// installed (e.g. auto-trade only needs Polymarket constants, not Base ABIs).
+let parseAbi;
+try {
+  const mod = await import("viem");
+  parseAbi = mod.parseAbi;
+} catch {
+  // viem not available — ABI exports will be null
+  parseAbi = () => null;
+}
 
 // ─── RPC Endpoints ──────────────────────────────────────────────────────────
 

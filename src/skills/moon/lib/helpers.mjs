@@ -1,6 +1,14 @@
 // moon/lib/helpers.mjs -- Shared utility functions
 
-import { PublicKey } from "@solana/web3.js";
+// Lazy-load @solana/web3.js — allows this module to be imported even when
+// the Solana package isn't installed (e.g. auto-trade doesn't need it).
+let PublicKey;
+try {
+  const mod = await import("@solana/web3.js");
+  PublicKey = mod.PublicKey;
+} catch {
+  // @solana/web3.js not available — readPublicKey() will throw if called
+}
 
 export function out(data) {
   console.log(JSON.stringify(data, null, 2));
@@ -25,6 +33,7 @@ export function readU64LE(buf, offset) {
 }
 
 export function readPublicKey(buf, offset) {
+  if (!PublicKey) throw new Error("@solana/web3.js not installed — readPublicKey unavailable");
   return new PublicKey(buf.subarray(offset, offset + 32)).toBase58();
 }
 

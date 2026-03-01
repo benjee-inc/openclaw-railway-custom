@@ -18,16 +18,20 @@ import { categorize, isSportsMarket } from "../../polymarket-alpha/lib/categoriz
 import { match, fetchAltData } from "../../polymarket-alpha/lib/matcher.mjs";
 import { score, recommendation } from "../../polymarket-alpha/lib/scorer.mjs";
 import { fetchOrderBook, analyzeDepth } from "../../polymarket-alpha/lib/depth.mjs";
-import { buildGraph, detectViolations, detectViolationsAsync } from "../../polymarket-alpha/lib/network.mjs";
+// DISABLED: Network signals generate massive false positives and bypass palpha validation.
+// They caused buying multiple mutually exclusive outcomes (e.g., 5 Trump/Putin locations).
+// import { buildGraph, detectViolations, detectViolationsAsync } from "../../polymarket-alpha/lib/network.mjs";
 
 // ── Constants ────────────────────────────────────────────
 
 const MAX_PER_TRADE = 20;       // $20 USDC
-const MAX_PER_DAY = Infinity;   // no daily limit
-const MIN_LIQUIDITY = 50_000;   // $50K default
-const MIN_LIQUIDITY_WEATHER = 10_000; // $10K for weather markets
+const MAX_PER_DAY = 50;         // $50 USDC daily limit
+const MIN_LIQUIDITY = 200_000;  // $200K minimum liquidity
+const MIN_LIQUIDITY_WEATHER = 50_000; // $50K for weather markets
 const MAX_TRADES_PER_INVOCATION = 3;
+const MAX_OPEN_POSITIONS = 10;  // Never hold more than 10 positions at once
 const MIN_TRADE = 5;            // $5 minimum
+const MAX_SPREAD_RATIO = 0.05;  // Skip trades where spread > 5% of entry price
 const DEFAULT_STALE_MS = 600_000; // 10 minutes
 const DEFAULT_REPO = "benjee-inc/polymarket-arb-dashboard";
 const JSONL_PATH = "logs/terminal.jsonl";
@@ -105,6 +109,8 @@ function getMinLiquidity(question) {
   return category === "weather" ? MIN_LIQUIDITY_WEATHER : MIN_LIQUIDITY;
 }
 
+const MIN_PRICE = 0.35; // Don't bet on outliers below 35% odds — low-price markets have devastating spreads
+
 function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
   const opportunities = [];
 
@@ -150,7 +156,7 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
     if (!m.conditionId) continue;
     const market = marketMap.get(m.conditionId);
     if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
-    if (m.price > 0.95 || m.price < 0.05) continue;
+    if (m.price > 0.95 || m.price < MIN_PRICE) continue;
     if (isSportsMarket(m.q || market.question || "")) continue;
 
     const outcome = m.change1h > 0 ? "yes" : "no";
@@ -411,6 +417,7 @@ async function detectNetworkSignals(markets, dailySpend, maxDay) {
       const conditionId = v.markets[0];
       const market = markets.find((m) => m.conditionId === conditionId);
       if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
+      if ((market.prices?.[0] || 0) < MIN_PRICE) continue;
       const amount = sizePosition(v.severity * 10000, "flow", dailySpend, maxDay);
       if (amount < MIN_TRADE || dailySpend + amount > maxDay) continue;
 
@@ -425,6 +432,7 @@ async function detectNetworkSignals(markets, dailySpend, maxDay) {
       const conditionId = v.markets[0];
       const market = markets.find((m) => m.conditionId === conditionId);
       if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
+      if ((market.prices?.[0] || 0) < MIN_PRICE) continue;
       const outcome = v.yesPrice <= v.noPrice ? "yes" : "no";
       const amount = sizePosition(Math.abs(v.deviation) * 10000, "spread", dailySpend, maxDay);
       if (amount < MIN_TRADE || dailySpend + amount > maxDay) continue;
@@ -441,6 +449,7 @@ async function detectNetworkSignals(markets, dailySpend, maxDay) {
       const cheaperId = v.prices[0] < v.prices[1] ? id1 : id2;
       const market = markets.find((m) => m.conditionId === cheaperId);
       if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
+      if ((market.prices?.[0] || 0) < MIN_PRICE) continue;
       const amount = sizePosition(v.severity * 5000, "momentum", dailySpend, maxDay);
       if (amount < MIN_TRADE || dailySpend + amount > maxDay) continue;
 
@@ -608,15 +617,19 @@ export async function cmdAutoTrade(args, opts = {}) {
     log.push(`[palpha] Error: ${err.message}. Using raw scores.`);
   }
 
-  // 8. Network violations
-  try {
-    const { opportunities: netOpps, entries: netEntries } = await detectNetworkSignals(markets, atState.dailySpend, maxDay);
-    opportunities.push(...netOpps);
-    log.push(...netEntries);
-    opportunities.sort((a, b) => (b._palphaAdjustedScore || b.score) - (a._palphaAdjustedScore || a.score));
-  } catch (err) {
-    log.push(`[network] Error: ${err.message}`);
-  }
+  // 8. Network violations — DISABLED
+  // Network signals generated 293+ false positives/cycle, bypassed palpha validation,
+  // and caused buying multiple mutually exclusive outcomes (guaranteed losses).
+  log.push(`[network] DISABLED — network signals removed (false positive rate too high)`);
+  // To re-enable: uncomment network import at top and the detectNetworkSignals call below.
+  // try {
+  //   const { opportunities: netOpps, entries: netEntries } = await detectNetworkSignals(markets, atState.dailySpend, maxDay);
+  //   opportunities.push(...netOpps);
+  //   log.push(...netEntries);
+  //   opportunities.sort((a, b) => (b._palphaAdjustedScore || b.score) - (a._palphaAdjustedScore || a.score));
+  // } catch (err) {
+  //   log.push(`[network] Error: ${err.message}`);
+  // }
 
   // 9. Execute trades
   const tradesExecuted = [];
@@ -624,9 +637,28 @@ export async function cmdAutoTrade(args, opts = {}) {
   let tradeCount = 0;
   let currentSpend = atState.dailySpend;
 
+  // Same-event dedup: build set of event slugs we already hold positions in
+  const heldEventSlugs = new Set();
+  const allHeld = getPolyBets({ status: "open" });
+  let currentOpenPositions = allHeld.length;
+  for (const h of allHeld) {
+    const hMkt = markets.find(m => m.conditionId === h.conditionId);
+    if (hMkt?.eventSlug) heldEventSlugs.add(hMkt.eventSlug);
+  }
+  // Track event slugs traded THIS cycle to avoid duplicates
+  const tradedEventSlugs = new Set();
+
+  if (currentOpenPositions >= MAX_OPEN_POSITIONS) {
+    log.push(`[auto-trade] Position cap hit: ${currentOpenPositions}/${MAX_OPEN_POSITIONS} open positions. No new trades until positions close.`);
+  }
+
   for (const opp of opportunities) {
     if (tradeCount >= maxTrades) {
       skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: "max trades per invocation" });
+      continue;
+    }
+    if (currentOpenPositions + tradeCount >= MAX_OPEN_POSITIONS) {
+      skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: `position cap: ${currentOpenPositions + tradeCount}/${MAX_OPEN_POSITIONS} open` });
       continue;
     }
     if (currentSpend + opp.amount > maxDay) {
@@ -645,6 +677,26 @@ export async function cmdAutoTrade(args, opts = {}) {
       continue;
     }
 
+    // Same-event dedup: never buy multiple outcomes of the same event
+    const oppMarket = markets.find(m => m.conditionId === opp.conditionId);
+    const oppEventSlug = oppMarket?.eventSlug;
+    if (oppEventSlug) {
+      if (heldEventSlugs.has(oppEventSlug) || tradedEventSlugs.has(oppEventSlug)) {
+        skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: `same-event dedup: already hold/traded another outcome in event "${oppEventSlug}"` });
+        continue;
+      }
+    }
+
+    // Spread guard: skip if spread is too wide relative to entry price
+    if (oppMarket) {
+      const entryP = opp.outcome === "yes" ? (oppMarket.bestBid || oppMarket.prices?.[0] || 0) : (oppMarket.prices?.[1] || 0);
+      const spread = oppMarket.spread || (oppMarket.bestAsk && oppMarket.bestBid ? oppMarket.bestAsk - oppMarket.bestBid : 0);
+      if (entryP > 0 && spread > 0 && (spread / entryP) > MAX_SPREAD_RATIO) {
+        skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: `spread too wide: ${(spread * 100).toFixed(1)}¢ on ${(entryP * 100).toFixed(1)}¢ entry (${((spread / entryP) * 100).toFixed(0)}% > ${MAX_SPREAD_RATIO * 100}% max)` });
+        continue;
+      }
+    }
+
     if (dryRun) {
       skipped.push({
         conditionId: opp.conditionId, question: opp.question,
@@ -661,6 +713,8 @@ export async function cmdAutoTrade(args, opts = {}) {
         tradesExecuted.push(result);
         tradeCount++;
         currentSpend += opp.amount;
+        // Record event slug so we don't buy another outcome of the same event
+        if (oppEventSlug) tradedEventSlugs.add(oppEventSlug);
       } else {
         skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: result.reason });
       }

@@ -16,13 +16,14 @@ const API_KEY = process.env.X_API_KEY || "";
  * @returns {Promise<{probability: number, confidence: string, reasoning: string}|null>}
  */
 export async function analyzeMarket(question, category, marketPrice) {
-  if (!API_KEY) return null;
+  if (!API_KEY) { console.log("[grok] X_API_KEY not set, skipping"); return null; }
 
   const cacheKey = `grok:${question.slice(0, 80)}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
 
   try {
+    console.log(`[grok] calling xAI for: "${question.slice(0, 60)}"`);
     const res = await fetch(`${XAI_API}/chat/completions`, {
       method: "POST",
       headers: {
@@ -58,14 +59,21 @@ export async function analyzeMarket(question, category, marketPrice) {
         tools: [{ type: "x_search" }, { type: "web_search" }],
         temperature: 0,
       }),
-      signal: AbortSignal.timeout(8_000),
+      signal: AbortSignal.timeout(25_000),
     });
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.log(`[grok] API error ${res.status}: ${body.slice(0, 200)}`);
+      return null;
+    }
 
     const data = await res.json();
     const content = data.choices?.[0]?.message?.content;
-    if (!content) return null;
+    if (!content) {
+      console.log(`[grok] no content in response:`, JSON.stringify(data).slice(0, 300));
+      return null;
+    }
 
     // Extract JSON from response (may be wrapped in markdown code block)
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -86,7 +94,8 @@ export async function analyzeMarket(question, category, marketPrice) {
 
     cache.set(cacheKey, result, TTL.grok);
     return result;
-  } catch {
+  } catch (e) {
+    console.log(`[grok] error: ${e.message}`);
     return null;
   }
 }

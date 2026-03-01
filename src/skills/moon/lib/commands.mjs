@@ -1282,6 +1282,88 @@ export async function cmdBet(args) {
   } catch { /* silent */ }
 }
 
+export async function cmdCloseBet(args) {
+  const conditionId = args[0];
+  const outcome = args[1]?.toLowerCase();
+  const sharesArg = args[2];
+
+  if (!conditionId || !outcome || !sharesArg) {
+    console.error("Usage: moon close-bet <conditionId> <yes|no> <shares>");
+    process.exit(1);
+  }
+
+  if (outcome !== "yes" && outcome !== "no") {
+    console.error("Outcome must be 'yes' or 'no'.");
+    process.exit(1);
+  }
+
+  const shares = parseFloat(sharesArg);
+  if (isNaN(shares) || shares <= 0) {
+    console.error("Shares must be a positive number.");
+    process.exit(1);
+  }
+
+  const market = await getMarket(conditionId);
+  if (market.closed) {
+    out({ error: true, message: "Market is closed. Use 'moon redeem' instead." });
+    process.exit(1);
+  }
+
+  const tokenIdx = outcome === "yes" ? 0 : 1;
+  const tokenId = market.clobTokenIds?.[tokenIdx];
+  if (!tokenId) {
+    out({ error: true, message: `No CLOB token ID found for ${outcome.toUpperCase()} outcome.` });
+    process.exit(1);
+  }
+
+  const currentPrice = outcome === "yes" ? market.yesPrice : market.noPrice;
+  const estimatedProceeds = shares * currentPrice;
+
+  out({
+    action: "close-bet",
+    conditionId,
+    question: market.question,
+    outcome: outcome.toUpperCase(),
+    shares,
+    currentPrice,
+    estimatedProceeds: estimatedProceeds.toFixed(2),
+    negRisk: market.negRisk,
+    status: "selling",
+  });
+
+  const result = await placeBet(tokenId, "SELL", shares, market.negRisk, market.tickSize);
+
+  out({ action: "close-bet", conditionId, outcome: outcome.toUpperCase(), shares, ...result });
+
+  // Auto-journal the exit
+  try {
+    const questionShort = market.question.length > 60 ? market.question.slice(0, 57) + "..." : market.question;
+    addJournalEntry({
+      type: "sell",
+      chain: "polygon",
+      mint: conditionId,
+      symbol: questionShort,
+      amount: estimatedProceeds,
+      price: currentPrice,
+      mcap: null,
+      note: `Closed ${shares} ${outcome.toUpperCase()} shares`,
+      narratives: [],
+      signature: result.orderId || null,
+      polymarket: {
+        conditionId,
+        tokenId,
+        outcome: outcome.toUpperCase(),
+        orderType: "FOK",
+        shares: shares.toFixed(2),
+        side: "SELL",
+      },
+    });
+
+    // Update tracked bet status
+    updatePolyBet(conditionId, { status: "closed", exitPrice: currentPrice });
+  } catch { /* silent */ }
+}
+
 export async function cmdRedeem(args) {
   const sub = args[0];
 

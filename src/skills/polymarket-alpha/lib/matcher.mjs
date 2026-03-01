@@ -399,7 +399,7 @@ export async function fetchAltData(market, matchResult) {
           import("./sources/grok.mjs")
             .then((g) => g.analyzeMarket(market.question, market._category, market.prices?.[0] || 0.5))
             .then((r) => { if (r) data.grok = r; }),
-          SOURCE_TIMEOUT, "grok",
+          25_000, "grok",
         ));
         break;
     }

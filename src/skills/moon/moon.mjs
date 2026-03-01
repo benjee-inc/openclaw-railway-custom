@@ -10,7 +10,7 @@ import {
   cmdWallet, cmdBuy, cmdSell, cmdPositions,
   cmdScan,
   cmdJournal, cmdWatch, cmdCalc, cmdReview,
-  cmdMarket, cmdOdds, cmdBet, cmdRedeem,
+  cmdMarket, cmdOdds, cmdBet, cmdCloseBet, cmdRedeem,
 } from "./lib/commands.mjs";
 import { cmdAutoTrade } from "./lib/auto-trade-cmd.mjs";
 
@@ -74,6 +74,7 @@ PREDICTION MARKETS (Polymarket, requires POLYMARKET_PRIVATE_KEY):
   moon odds <conditionId>               Current YES/NO prices + spread
   moon bet <id> <yes|no> <$amt>         Market order (instant fill)
   moon bet <id> <yes|no> <$amt> --limit 0.65  Limit order
+  moon close-bet <id> <yes|no> <shares> Close/sell position (market order)
   moon redeem <conditionId>             Check/redeem resolved position
   moon redeem list                      Redeemable positions
   moon auto-trade [--dry-run]           Execute trades from scanner signals (palpha-gated)
@@ -132,6 +133,7 @@ const COMMANDS = {
   market: cmdMarket,
   odds: cmdOdds,
   bet: cmdBet,
+  "close-bet": cmdCloseBet,
   redeem: cmdRedeem,
   "auto-trade": cmdAutoTrade,
 };
