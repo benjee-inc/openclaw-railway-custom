@@ -295,7 +295,20 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       opp.score = adjustedScore;
 
       const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-      entries.push(`[palpha] "${(market.question || "").slice(0, 50)}" cat=${category} rec=${rec} alpha=${(scoreResult.alpha * 100).toFixed(1)}% (${elapsed}s)`);
+      const srcList = (scoreResult.sources || []).join(",");
+      const dir = scoreResult.direction || "?";
+      const conf = ((scoreResult.confidence || 0) * 100).toFixed(0);
+      const implied = scoreResult.altDataImplied != null ? (scoreResult.altDataImplied * 100).toFixed(1) + "%" : "n/a";
+      const mktPct = ((market.prices?.[0] || 0) * 100).toFixed(1);
+      const depthInfo = depthResult
+        ? `depth=${depthResult.executable ? "OK" : "FAIL"} slippage=$${(depthResult.slippage?.["$100"] ?? 0).toFixed(2)}`
+        : "depth=n/a";
+      const aligned = (scannerBuyingYes && palphaFavorsYes) || (!scannerBuyingYes && !palphaFavorsYes) ? "ALIGNED" : "CONFLICT";
+
+      entries.push(`[palpha] "${(market.question || "").slice(0, 60)}" | cat=${category} rec=${rec} alpha=${(scoreResult.alpha * 100).toFixed(1)}% conf=${conf}% | mkt=${mktPct}% implied=${implied} dir=${dir} | sources=[${srcList}] | ${depthInfo} | scanner=${opp.outcome.toUpperCase()} vs palpha=${palphaFavorsYes ? "YES" : "NO"} → ${aligned} | (${elapsed}s)`);
+      if (scoreResult.detail) {
+        entries.push(`[palpha]   reasoning: ${scoreResult.detail.trim().slice(0, 300)}`);
+      }
       return { opp, enriched: true, vetoed: false };
     } catch (err) {
       entries.push(`[palpha] Error: "${(opp.question || "").slice(0, 50)}": ${err.message}`);
@@ -340,7 +353,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
     processedIds.add(opp.conditionId);
     if (isVetoed) {
       vetoedCount++;
-      entries.push(`[palpha] VETOED: "${(opp.question || "").slice(0, 50)}" — ${reason}`);
+      entries.push(`[palpha] VETOED: "${(opp.question || "").slice(0, 60)}" — ${reason}`);
       continue;
     }
     enrichedOpps.push(opp);
@@ -379,6 +392,9 @@ async function detectNetworkSignals(markets, dailySpend, maxDay) {
 
   if (violations.length > 0) {
     entries.push(`[network] ${violations.length} structural violations across ${graph.nodeCount()} markets.`);
+    for (const v of violations.slice(0, 5)) {
+      entries.push(`[network]   ${v.type}: severity=${(v.severity || 0).toFixed(3)} | ${(v.detail || "").slice(0, 150)}`);
+    }
   }
 
   for (const v of violations) {
