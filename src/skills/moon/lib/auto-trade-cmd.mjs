@@ -567,6 +567,7 @@ export async function cmdAutoTrade(args) {
   // 3. Check if we already processed this cycle
   const atState = getAutoTraderState();
   if (signalData.cycle && atState.lastCycle === signalData.cycle) {
+    await pushToDashboard([{ timestamp: new Date().toISOString(), type: "palpha", message: `[auto-trade] Cycle ${signalData.cycle} already processed. Waiting for next scanner cycle. Daily: $${atState.dailySpend.toFixed(2)}` }]);
     return out({
       message: `Cycle ${signalData.cycle} already processed. Waiting for next scanner cycle.`,
       tradesExecuted: [], skipped: [], dailySpend: atState.dailySpend,
