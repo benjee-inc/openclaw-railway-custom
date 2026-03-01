@@ -827,6 +827,7 @@ async function runScanCycle() {
   if (!token) return;
 
   let newEntries = [];
+  let autoTradeEntries = [];
 
   try {
     // Fetch all data sources in parallel
@@ -865,12 +866,13 @@ async function runScanCycle() {
           try { tradeOutput = JSON.parse(a[0]); } catch { /* not JSON */ }
         }
       };
-      await cmdAutoTrade([]);
+      await cmdAutoTrade([], { skipDashboardPush: true });
       console.log = origLog;
       if (tradeOutput) {
         const trades = tradeOutput.tradesExecuted?.length || 0;
         const vetoed = tradeOutput.vetoed || 0;
         console.log(`[scanner] auto-trade: ${trades} executed, ${vetoed} vetoed, daily=$${(tradeOutput.dailySpend || 0).toFixed(2)}`);
+        if (tradeOutput.dashEntries) autoTradeEntries = tradeOutput.dashEntries;
       }
     } catch (err) {
       console.error(`[scanner] auto-trade error: ${err.message}`);
@@ -880,14 +882,14 @@ async function runScanCycle() {
     newEntries = [entry("scan", `Error: ${err.message}`)];
   }
 
-  // Push to GitHub (scanner entries only)
+  // Push to GitHub (scanner + auto-trade entries combined — single write to avoid SHA race)
   try {
     const { sha, entries: existing } = await getExistingJsonl(token, repo);
     const parsedNew = newEntries.map((e) => typeof e === "string" ? JSON.parse(e) : e);
-    const combined = [...existing, ...parsedNew];
+    const combined = [...existing, ...autoTradeEntries, ...parsedNew];
     const trimmed = combined.slice(-MAX_ENTRIES);
     await pushJsonl(token, repo, sha, trimmed);
-    console.log(`[scanner] pushed ${newEntries.length} scan entries (total: ${trimmed.length})`);
+    console.log(`[scanner] pushed ${newEntries.length} scan + ${autoTradeEntries.length} trade entries (total: ${trimmed.length})`);
   } catch (err) {
     console.error(`[scanner] GitHub push error: ${err.message}`);
   }
