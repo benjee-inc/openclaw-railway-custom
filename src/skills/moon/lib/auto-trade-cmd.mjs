@@ -24,7 +24,6 @@ import { fetchOrderBook, analyzeDepth } from "../../polymarket-alpha/lib/depth.m
 
 // ── Constants ────────────────────────────────────────────
 
-const MAX_PER_TRADE = 20;       // $20 USDC
 const MAX_PER_DAY = Infinity;   // No daily limit
 const MIN_LIQUIDITY = 200_000;  // $200K minimum liquidity
 const MIN_LIQUIDITY_WEATHER = 50_000; // $50K for weather markets
@@ -112,18 +111,42 @@ function readSignals() {
 
 // ── Position sizing ──────────────────────────────────────
 
+// Initial sizing for raw scanner signals (before palpha enrichment)
 function sizePosition(score, signalType, dailySpend, maxDay) {
-  let size = 10; // base $10
+  let size = 10; // base $10 — will be resized after palpha enrichment
+  return Math.max(MIN_TRADE, Math.floor(Math.min(size, maxDay - dailySpend)));
+}
 
-  if (signalType === "flow" && score > 5000) size = 15;
-  if (signalType === "flow" && score > 15000) size = 20;
-  if (signalType === "momentum" && score > 0.05) size = 15;
-  if (signalType === "spread" && score > 500) size = 15;
+// Conviction-based sizing after palpha enrichment
+// Uses alpha, confidence, Grok confidence, and portfolio balance
+function sizeByConviction(opp, portfolioBalance) {
+  const alpha = opp._palphaAlpha || 0;
+  const conf = opp._palphaConf || 0.3;
+  const rec = opp._palphaRec || "NOTABLE";
+  const grokConf = opp._grokConf || "low";
 
-  size = Math.min(size, MAX_PER_TRADE);
-  size = Math.min(size, maxDay - dailySpend);
+  // Kelly-inspired fraction: bet size proportional to edge * confidence
+  // f = edge * confidence, capped for safety
+  const edge = Math.min(alpha, 0.40); // cap edge at 40%
+  const kellyFraction = edge * conf;
 
-  return Math.max(MIN_TRADE, Math.floor(size));
+  // Base allocation as % of portfolio
+  // ACTIONABLE + high grok: up to 8% of portfolio
+  // ACTIONABLE + medium grok: up to 5%
+  // NOTABLE: up to 3%
+  let maxPct;
+  if (rec === "ACTIONABLE" && grokConf === "high") maxPct = 0.08;
+  else if (rec === "ACTIONABLE") maxPct = 0.05;
+  else maxPct = 0.03;
+
+  // Scale by kelly fraction (higher edge+conf = larger bet)
+  let size = portfolioBalance * Math.min(kellyFraction, maxPct);
+
+  // Floor and ceiling
+  size = Math.max(MIN_TRADE, size);
+  size = Math.min(size, portfolioBalance * 0.10); // never more than 10% of portfolio on one trade
+
+  return Math.floor(size);
 }
 
 // ── Signal evaluation (transplanted from auto-trader.mjs) ─
@@ -327,10 +350,12 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
 
       opp._palphaRec = rec;
       opp._palphaAlpha = scoreResult.alpha;
+      opp._palphaConf = scoreResult.confidence;
       opp._palphaSources = scoreResult.sources;
       opp._palphaAdjustedScore = adjustedScore;
       opp._depthScore = depthResult?.depthScore ?? null;
       opp._depthSlippage = depthResult?.slippage?.["$100"] ?? null;
+      opp._grokConf = altData?.grok?.confidence || null;
       opp.score = adjustedScore;
 
       const elapsed = ((Date.now() - started) / 1000).toFixed(1);
@@ -644,7 +669,7 @@ export async function cmdAutoTrade(args, opts = {}) {
   // 8. Network violations — DISABLED
   // Network signals generated 293+ false positives/cycle, bypassed palpha validation,
   // and caused buying multiple mutually exclusive outcomes (guaranteed losses).
-  log.push(`[network] DISABLED — network signals removed (false positive rate too high)`);
+  // log.push(`[network] DISABLED`); // silenced — no need to announce every cycle
   // To re-enable: uncomment network import at top and the detectNetworkSignals call below.
   // try {
   //   const { opportunities: netOpps, entries: netEntries } = await detectNetworkSignals(markets, atState.dailySpend, maxDay);
@@ -654,6 +679,30 @@ export async function cmdAutoTrade(args, opts = {}) {
   // } catch (err) {
   //   log.push(`[network] Error: ${err.message}`);
   // }
+
+  // 8b. Fetch portfolio balance for conviction-based sizing
+  let portfolioBalance = 300; // fallback estimate
+  try {
+    const walletAddr = process.env.POLYMARKET_WALLET_ADDRESS || await deriveWalletAddress();
+    if (walletAddr) {
+      // Fetch USDC balance from Polymarket proxy wallet
+      const balRes = await fetch(`${DATA_API}/balance?user=${walletAddr}`, { signal: AbortSignal.timeout(5_000) });
+      if (balRes.ok) {
+        const balData = await balRes.json();
+        const usdcBal = parseFloat(balData?.balance || balData?.usdc || 0);
+        if (usdcBal > 0) portfolioBalance = usdcBal;
+      }
+    }
+  } catch {}
+
+  // 8c. Resize enriched opportunities by conviction
+  for (const opp of opportunities) {
+    if (opp._palphaRec) {
+      const oldAmount = opp.amount;
+      opp.amount = sizeByConviction(opp, portfolioBalance);
+      log.push(`[sizing] "${(opp.question || "").slice(0, 45)}" — ${opp._palphaRec} alpha=${((opp._palphaAlpha || 0) * 100).toFixed(0)}% grok=${opp._grokConf || "n/a"} → $${opp.amount} (portfolio $${portfolioBalance.toFixed(0)})`);
+    }
+  }
 
   // 9. Execute trades
   const tradesExecuted = [];
