@@ -32,10 +32,34 @@ const MAX_TRADES_PER_INVOCATION = 3;
 const MAX_OPEN_POSITIONS = 10;  // Never hold more than 10 positions at once
 const MIN_TRADE = 5;            // $5 minimum
 const MAX_SPREAD_RATIO = 0.05;  // Skip trades where spread > 5% of entry price
+const DUST_VALUE_THRESHOLD = 0.50; // Positions worth < $0.50 are dust — don't count toward cap
+const DATA_API = "https://data-api.polymarket.com";
 const DEFAULT_STALE_MS = 600_000; // 10 minutes
 const DEFAULT_REPO = "benjee-inc/polymarket-arb-dashboard";
 const JSONL_PATH = "logs/terminal.jsonl";
 const MAX_JSONL_ENTRIES = 200;
+
+// ── Wallet address derivation ────────────────────────────
+
+let _cachedWalletAddr = null;
+async function deriveWalletAddress() {
+  if (_cachedWalletAddr) return _cachedWalletAddr;
+  const pk = process.env.POLYMARKET_PRIVATE_KEY;
+  if (!pk) return null;
+  try {
+    const ethers = await import("ethers");
+    _cachedWalletAddr = new ethers.Wallet(pk).address;
+    return _cachedWalletAddr;
+  } catch {}
+  try {
+    const { createRequire } = await import("node:module");
+    const req = createRequire("/usr/local/lib/node_modules/");
+    const ethers = req("ethers");
+    _cachedWalletAddr = new ethers.Wallet(pk).address;
+    return _cachedWalletAddr;
+  } catch {}
+  return null;
+}
 
 // ── GitHub JSONL push (dashboard) ────────────────────────
 
@@ -637,13 +661,50 @@ export async function cmdAutoTrade(args, opts = {}) {
   let tradeCount = 0;
   let currentSpend = atState.dailySpend;
 
-  // Same-event dedup: build set of event slugs we already hold positions in
+  // Fetch LIVE positions from data-API (on-chain truth) and ignore dust
   const heldEventSlugs = new Set();
-  const allHeld = getPolyBets({ status: "open" });
-  let currentOpenPositions = allHeld.length;
-  for (const h of allHeld) {
-    const hMkt = markets.find(m => m.conditionId === h.conditionId);
-    if (hMkt?.eventSlug) heldEventSlugs.add(hMkt.eventSlug);
+  const heldConditionIds = new Set();
+  let currentOpenPositions = 0;
+  let totalPositions = 0;
+  let dustCount = 0;
+  try {
+    const walletAddr = process.env.POLYMARKET_WALLET_ADDRESS || await deriveWalletAddress();
+    if (walletAddr) {
+      const posRes = await fetch(`${DATA_API}/positions?user=${walletAddr}`, { signal: AbortSignal.timeout(10_000) });
+      if (posRes.ok) {
+        const livePositions = await posRes.json();
+        if (Array.isArray(livePositions)) {
+          totalPositions = livePositions.length;
+          for (const p of livePositions) {
+            const size = parseFloat(p.size || 0);
+            const curPrice = parseFloat(p.curPrice || 0);
+            if (size <= 0) continue;
+            const currentValue = size * curPrice;
+            if (currentValue < DUST_VALUE_THRESHOLD) {
+              dustCount++;
+              continue; // dust — don't count toward cap or event dedup
+            }
+            currentOpenPositions++;
+            heldConditionIds.add(p.conditionId);
+            const hMkt = markets.find(m => m.conditionId === p.conditionId);
+            if (hMkt?.eventSlug) heldEventSlugs.add(hMkt.eventSlug);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    // Fallback to local state if data-API fails
+    const allHeld = getPolyBets({ status: "open" });
+    currentOpenPositions = allHeld.length;
+    for (const h of allHeld) {
+      heldConditionIds.add(h.conditionId);
+      const hMkt = markets.find(m => m.conditionId === h.conditionId);
+      if (hMkt?.eventSlug) heldEventSlugs.add(hMkt.eventSlug);
+    }
+    log.push(`[auto-trade] Warning: data-API position fetch failed (${err.message}), using local state`);
+  }
+  if (dustCount > 0) {
+    log.push(`[auto-trade] Ignoring ${dustCount} dust positions (value < $${DUST_VALUE_THRESHOLD}). Active: ${currentOpenPositions}/${totalPositions} total.`);
   }
   // Track event slugs traded THIS cycle to avoid duplicates
   const tradedEventSlugs = new Set();
@@ -670,10 +731,14 @@ export async function cmdAutoTrade(args, opts = {}) {
       continue;
     }
 
-    // Skip markets we already hold
-    const held = getPolyBets({ conditionId: opp.conditionId, status: "open" });
-    if (held.length > 0) {
+    // Skip markets we already hold (check live positions first, fallback to local state)
+    if (heldConditionIds.has(opp.conditionId)) {
       skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: "already held" });
+      continue;
+    }
+    const heldLocal = getPolyBets({ conditionId: opp.conditionId, status: "open" });
+    if (heldLocal.length > 0) {
+      skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: "already held (local)" });
       continue;
     }
 
