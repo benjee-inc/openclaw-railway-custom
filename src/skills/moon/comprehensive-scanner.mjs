@@ -692,7 +692,7 @@ async function fetchOnChainPositions() {
   }
 }
 
-function transformStateForDashboard(onChainPositions, walletBalance) {
+function transformStateForDashboard(onChainPositions, walletBalance, previousState) {
   // Use actual on-chain positions as source of truth (not local state.json)
   const bets = onChainPositions.map(p => {
     const size = parseFloat(p.size || p.amount || 0);
@@ -734,15 +734,43 @@ function transformStateForDashboard(onChainPositions, walletBalance) {
     };
   });
 
+  // Detect closed positions by diffing with previous state
+  const prevBets = previousState?.bets || [];
+  const prevClosed = previousState?.closedBets || [];
+  const currentTokenIds = new Set(bets.map(b => b.tokenId));
+
+  const newlyClosed = [];
+  for (const prev of prevBets) {
+    if (!currentTokenIds.has(prev.tokenId)) {
+      // Position gone from on-chain = closed/sold
+      // Use last known live price as exit price
+      const prevLive = (previousState?.livePositions || []).find(lp => lp.conditionId === prev.conditionId);
+      const exitPrice = prevLive?.livePrice || prev.price;
+      const proceeds = prev.shares * exitPrice;
+      const pnl = proceeds - prev.amount;
+      newlyClosed.push({
+        ...prev,
+        exitPrice,
+        pnl: parseFloat(pnl.toFixed(3)),
+        exitReason: "manual close",
+        closedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  // Merge with previously tracked closed bets (cap at 100)
+  const closedBets = [...prevClosed, ...newlyClosed].slice(-100);
+  const realizedPnl = parseFloat(closedBets.reduce((s, b) => s + (b.pnl || 0), 0).toFixed(3));
+
   const deployed = bets.reduce((s, b) => s + (b.amount || 0), 0);
 
   return {
     bankroll: walletBalance != null ? walletBalance : 0,
     bets,
-    closedBets: [],
+    closedBets,
     livePositions,
     deployed,
-    realizedPnl: 0,
+    realizedPnl,
     scanCount: cycleCount,
     lastUpdate: new Date().toISOString(),
   };
@@ -755,12 +783,11 @@ async function pushStateToGithub(token, repo) {
     fetchPolygonUsdcBalance(),
   ]);
 
-  const dashState = transformStateForDashboard(onChainPositions, walletBalance);
-
   const url = `https://api.github.com/repos/${repo}/contents/${STATE_PATH}`;
 
-  // Get existing sha
+  // Get existing state + sha (for closed position tracking and atomic update)
   let sha = null;
+  let previousState = null;
   try {
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json" },
@@ -769,8 +796,13 @@ async function pushStateToGithub(token, repo) {
     if (res.ok) {
       const data = await res.json();
       sha = data.sha;
+      try {
+        previousState = JSON.parse(Buffer.from(data.content, "base64").toString("utf-8"));
+      } catch {}
     }
   } catch {}
+
+  const dashState = transformStateForDashboard(onChainPositions, walletBalance, previousState);
 
   const content = Buffer.from(JSON.stringify(dashState, null, 2)).toString("base64");
   const res = await fetch(url, {
@@ -783,7 +815,8 @@ async function pushStateToGithub(token, repo) {
     const text = await res.text().catch(() => "");
     throw new Error(`GitHub state PUT ${res.status}: ${text.slice(0, 200)}`);
   }
-  console.log(`[scanner] state synced → ${onChainPositions.length} positions, deployed=$${dashState.deployed.toFixed(2)}, balance=$${(walletBalance ?? 0).toFixed(2)}`);
+  const closedCount = dashState.closedBets?.length || 0;
+  console.log(`[scanner] state synced → ${onChainPositions.length} positions, ${closedCount} closed, deployed=$${dashState.deployed.toFixed(2)}, realized=$${dashState.realizedPnl.toFixed(2)}, balance=$${(walletBalance ?? 0).toFixed(2)}`);
 }
 
 // ── Scan cycle ───────────────────────────────────────────
@@ -819,6 +852,29 @@ async function runScanCycle() {
 
     // Write structured signals to disk for moon auto-trade
     writeSignalsToFile(markets, signals, tradeFlows, midShifts);
+
+    // Run auto-trade inline (no cron agent needed)
+    try {
+      const { cmdAutoTrade } = await import("./lib/auto-trade-cmd.mjs");
+      // Suppress stdout output — capture via monkey-patch
+      const origLog = console.log;
+      let tradeOutput = null;
+      console.log = (...a) => {
+        // Capture the JSON output from out()
+        if (a.length === 1 && typeof a[0] === "string" && a[0].startsWith("{")) {
+          try { tradeOutput = JSON.parse(a[0]); } catch { /* not JSON */ }
+        }
+      };
+      await cmdAutoTrade([]);
+      console.log = origLog;
+      if (tradeOutput) {
+        const trades = tradeOutput.tradesExecuted?.length || 0;
+        const vetoed = tradeOutput.vetoed || 0;
+        console.log(`[scanner] auto-trade: ${trades} executed, ${vetoed} vetoed, daily=$${(tradeOutput.dailySpend || 0).toFixed(2)}`);
+      }
+    } catch (err) {
+      console.error(`[scanner] auto-trade error: ${err.message}`);
+    }
   } catch (err) {
     console.error(`[scanner] cycle error: ${err.message}`);
     newEntries = [entry("scan", `Error: ${err.message}`)];
