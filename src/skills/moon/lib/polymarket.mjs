@@ -34,6 +34,18 @@ export async function getPolyClient() {
   const ethers = await getEthers();
   const wallet = new ethers.Wallet(pk);
 
+  // ── ethers v5/v6 compatibility shim ──────────────────────────────────────
+  // @polymarket/clob-client expects ethers v5 which has wallet._signTypedData().
+  // ethers v6 renamed it to wallet.signTypedData() (no underscore).
+  // If the wrong version is loaded (or npm hoists v6), shim the missing method.
+  if (typeof wallet._signTypedData !== "function" && typeof wallet.signTypedData === "function") {
+    wallet._signTypedData = wallet.signTypedData.bind(wallet);
+    console.log("[polymarket] Applied ethers v6→v5 shim: _signTypedData = signTypedData");
+  } else if (typeof wallet.signTypedData !== "function" && typeof wallet._signTypedData === "function") {
+    wallet.signTypedData = wallet._signTypedData.bind(wallet);
+    console.log("[polymarket] Applied ethers v5→v6 shim: signTypedData = _signTypedData");
+  }
+
   const { ClobClient } = await getClobModule();
 
   // Check for cached API creds

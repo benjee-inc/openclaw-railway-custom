@@ -283,11 +283,11 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
 
   const results = await Promise.race([
     Promise.allSettled(enrichPromises),
-    new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+    new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
   ]);
 
   if (!results) {
-    entries.push("[palpha] Timeout after 5s. Proceeding with raw scores.");
+    entries.push("[palpha] Timeout after 15s. Proceeding with raw scores.");
     return { enriched: opportunities, entries, vetoed: 0 };
   }
 

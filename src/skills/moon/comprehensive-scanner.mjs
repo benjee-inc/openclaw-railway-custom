@@ -19,6 +19,7 @@ const CLOB_API = "https://clob.polymarket.com";
 const DEFAULT_INTERVAL_MS = 300_000;
 const DEFAULT_REPO = "benjee-inc/polymarket-arb-dashboard";
 const JSONL_PATH = "logs/terminal.jsonl";
+const STATE_PATH = "state.json";
 const MAX_ENTRIES = 200;
 
 let intervalId = null;
@@ -563,6 +564,202 @@ function writeSignalsToFile(markets, signals, tradeFlows, midShifts) {
   }
 }
 
+// ── Polygon USDC balance ─────────────────────────────────
+
+const POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com";
+const POLY_USDC_ADDR = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // USDC on Polygon (6 decimals)
+
+let _walletAddress = null;
+async function getWalletAddress() {
+  if (_walletAddress) return _walletAddress;
+
+  // 1. Explicit env var (zero-dependency, fastest)
+  if (process.env.POLYMARKET_WALLET_ADDRESS) {
+    _walletAddress = process.env.POLYMARKET_WALLET_ADDRESS;
+    return _walletAddress;
+  }
+
+  const pk = process.env.POLYMARKET_PRIVATE_KEY;
+  if (!pk) return null;
+
+  // 2. Try local import
+  try {
+    const ethers = await import("ethers");
+    _walletAddress = new ethers.Wallet(pk).address;
+    return _walletAddress;
+  } catch {}
+
+  // 3. Try global npm location via createRequire
+  try {
+    const { createRequire } = await import("node:module");
+    const req = createRequire("/usr/local/lib/node_modules/");
+    const ethers = req("ethers");
+    _walletAddress = new ethers.Wallet(pk).address;
+    return _walletAddress;
+  } catch {}
+
+  // 4. Derive using Node.js crypto ECDH + keccak via global viem
+  try {
+    const crypto = await import("node:crypto");
+    const clean = pk.startsWith("0x") ? pk.slice(2) : pk;
+    const ecdh = crypto.createECDH("secp256k1");
+    ecdh.setPrivateKey(Buffer.from(clean, "hex"));
+    const pubUncompressed = ecdh.getPublicKey().subarray(1); // drop 0x04 prefix, 64 bytes
+
+    // Need keccak256 (NOT sha3-256). Try loading keccak from global viem.
+    const { createRequire } = await import("node:module");
+    const req = createRequire("/usr/local/lib/node_modules/");
+    const { keccak256 } = req("viem");
+    const hash = keccak256(pubUncompressed);
+    _walletAddress = "0x" + hash.slice(-40);
+    return _walletAddress;
+  } catch (err) {
+    console.error(`[scanner] wallet address derivation failed: ${err.message}`);
+    return null;
+  }
+}
+
+async function fetchPolygonUsdcBalance() {
+  const address = await getWalletAddress();
+  if (!address) return null;
+  try {
+    // balanceOf(address) selector = 0x70a08231, padded address
+    const paddedAddr = address.slice(2).toLowerCase().padStart(64, "0");
+    const data = "0x70a08231" + paddedAddr;
+    const res = await fetch(POLYGON_RPC, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "eth_call",
+        params: [{ to: POLY_USDC_ADDR, data }, "latest"],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const json = await res.json();
+    if (json.result) {
+      const raw = BigInt(json.result);
+      return Number(raw) / 1e6; // USDC has 6 decimals
+    }
+    return null;
+  } catch (err) {
+    console.error(`[scanner] USDC balance fetch failed: ${err.message}`);
+    return null;
+  }
+}
+
+// ── State sync to GitHub ─────────────────────────────────
+
+async function fetchOnChainPositions() {
+  const address = await getWalletAddress();
+  if (!address) return [];
+  try {
+    const res = await fetch(
+      `${DATA_API}/positions?user=${address}`,
+      { signal: AbortSignal.timeout(10_000) },
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.error(`[scanner] on-chain positions fetch failed: ${err.message}`);
+    return [];
+  }
+}
+
+function transformStateForDashboard(onChainPositions, walletBalance) {
+  // Use actual on-chain positions as source of truth (not local state.json)
+  const bets = onChainPositions.map(p => {
+    const size = parseFloat(p.size || p.amount || 0);
+    const avgPrice = parseFloat(p.avgPrice || p.price || 0);
+    const cost = size * avgPrice;
+    return {
+      conditionId: p.conditionId || p.asset,
+      tokenId: p.asset,
+      market: p.title || p.question || p.market || "Unknown",
+      side: p.outcome || "YES",
+      price: avgPrice,
+      amount: parseFloat(cost.toFixed(2)),
+      shares: size,
+      source: "bot",
+      timestamp: p.timestamp || new Date().toISOString(),
+    };
+  });
+
+  // Build livePositions with current value vs cost basis
+  const livePositions = onChainPositions.map(p => {
+    const size = parseFloat(p.size || p.amount || 0);
+    const avgPrice = parseFloat(p.avgPrice || p.price || 0);
+    const curPrice = parseFloat(p.curPrice || p.currentPrice || avgPrice);
+    const cost = size * avgPrice;
+    const currentValue = size * curPrice;
+    const pnl = currentValue - cost;
+    const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
+    return {
+      market: p.title || p.question || p.market || "Unknown",
+      side: p.outcome || "YES",
+      price: avgPrice,
+      amount: parseFloat(cost.toFixed(2)),
+      shares: size,
+      livePrice: curPrice,
+      livePnl: parseFloat(pnl.toFixed(3)),
+      livePnlPct: parseFloat(pnlPct.toFixed(2)),
+      hoursHeld: 0,
+      conditionId: p.conditionId || p.asset,
+    };
+  });
+
+  const deployed = bets.reduce((s, b) => s + (b.amount || 0), 0);
+
+  return {
+    bankroll: walletBalance != null ? walletBalance : 0,
+    bets,
+    closedBets: [],
+    livePositions,
+    deployed,
+    realizedPnl: 0,
+    scanCount: cycleCount,
+    lastUpdate: new Date().toISOString(),
+  };
+}
+
+async function pushStateToGithub(token, repo) {
+  // Fetch real on-chain positions + wallet balance (source of truth, not local state)
+  const [onChainPositions, walletBalance] = await Promise.all([
+    fetchOnChainPositions(),
+    fetchPolygonUsdcBalance(),
+  ]);
+
+  const dashState = transformStateForDashboard(onChainPositions, walletBalance);
+
+  const url = `https://api.github.com/repos/${repo}/contents/${STATE_PATH}`;
+
+  // Get existing sha
+  let sha = null;
+  try {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      sha = data.sha;
+    }
+  } catch {}
+
+  const content = Buffer.from(JSON.stringify(dashState, null, 2)).toString("base64");
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json", "Content-Type": "application/json" },
+    body: JSON.stringify({ message: `state sync: cycle ${cycleCount}`, content, ...(sha ? { sha } : {}) }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`GitHub state PUT ${res.status}: ${text.slice(0, 200)}`);
+  }
+  console.log(`[scanner] state synced → ${onChainPositions.length} positions, deployed=$${dashState.deployed.toFixed(2)}, balance=$${(walletBalance ?? 0).toFixed(2)}`);
+}
+
 // ── Scan cycle ───────────────────────────────────────────
 
 async function runScanCycle() {
@@ -611,6 +808,13 @@ async function runScanCycle() {
     console.log(`[scanner] pushed ${newEntries.length} scan entries (total: ${trimmed.length})`);
   } catch (err) {
     console.error(`[scanner] GitHub push error: ${err.message}`);
+  }
+
+  // Sync portfolio state to GitHub (every cycle)
+  try {
+    await pushStateToGithub(token, repo);
+  } catch (err) {
+    console.error(`[scanner] state sync error: ${err.message}`);
   }
 }
 
