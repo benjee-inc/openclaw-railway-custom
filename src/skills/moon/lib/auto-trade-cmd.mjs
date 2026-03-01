@@ -559,12 +559,9 @@ export async function cmdAutoTrade(args) {
   const age = Date.now() - new Date(signalData.timestamp).getTime();
   const staleAfter = signalData.staleAfterMs || DEFAULT_STALE_MS;
   if (age > staleAfter) {
-    return out({
-      error: true,
-      message: `Signals stale: ${(age / 1000).toFixed(0)}s old (max ${(staleAfter / 1000).toFixed(0)}s)`,
-      cycle: signalData.cycle,
-      tradesExecuted: [], skipped: [],
-    });
+    const msg = `Signals stale: ${(age / 1000).toFixed(0)}s old (max ${(staleAfter / 1000).toFixed(0)}s)`;
+    await pushToDashboard([{ timestamp: new Date().toISOString(), type: "palpha", message: `[auto-trade] ${msg}` }]);
+    return out({ error: true, message: msg, cycle: signalData.cycle, tradesExecuted: [], skipped: [] });
   }
 
   // 3. Check if we already processed this cycle
@@ -578,10 +575,9 @@ export async function cmdAutoTrade(args) {
 
   // 4. Check daily budget
   if (atState.dailySpend >= maxDay) {
-    return out({
-      message: `Daily limit reached: $${atState.dailySpend.toFixed(2)}/$${maxDay}`,
-      tradesExecuted: [], skipped: [], dailySpend: atState.dailySpend,
-    });
+    const msg = `Daily limit reached: $${atState.dailySpend.toFixed(2)}/$${maxDay}`;
+    await pushToDashboard([{ timestamp: new Date().toISOString(), type: "palpha", message: `[auto-trade] ${msg}` }]);
+    return out({ message: msg, tradesExecuted: [], skipped: [], dailySpend: atState.dailySpend });
   }
 
   // 5. Prune expired cooldowns
@@ -687,6 +683,8 @@ export async function cmdAutoTrade(args) {
   if (tradesExecuted.length === 0 && skipped.length > 0) {
     const reasons = [...new Set(skipped.map(s => s.reason))].join(", ");
     dashEntries.push({ timestamp: iso(), type: "trade", message: `[auto-trade] No trades: ${reasons}. Daily: $${currentSpend.toFixed(2)}/$${maxDay}` });
+  } else if (tradesExecuted.length === 0 && skipped.length === 0) {
+    dashEntries.push({ timestamp: iso(), type: "palpha", message: `[auto-trade] Cycle ${signalData.cycle || "?"}: ${rawOpportunities.length} raw opps, ${opportunities.length} after enrichment, ${palphaVetoed} vetoed. No actionable trades. Daily: $${currentSpend.toFixed(2)}/$${maxDay}` });
   }
   await pushToDashboard(dashEntries);
 
