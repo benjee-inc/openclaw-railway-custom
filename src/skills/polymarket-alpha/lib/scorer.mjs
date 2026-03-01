@@ -885,12 +885,12 @@ function applyGrokModifier(altData, marketPrice, sources, currentImplied) {
 
   sources.push("grok");
 
-  const confidenceBoost = grok.confidence === "high" ? 0.10
-    : grok.confidence === "medium" ? 0.06 : 0.02;
+  const confidenceBoost = grok.confidence === "high" ? 0.15
+    : grok.confidence === "medium" ? 0.10 : 0.04;
 
-  // Blend weight: 25% default, 35% if high confidence
-  const grokWeight = grok.confidence === "high" ? 0.35
-    : grok.confidence === "medium" ? 0.25 : 0.15;
+  // Blend weight: Grok uses real-time X/web search — give it dominant weight
+  const grokWeight = grok.confidence === "high" ? 0.60
+    : grok.confidence === "medium" ? 0.45 : 0.25;
 
   let newImplied;
   if (currentImplied != null) {
