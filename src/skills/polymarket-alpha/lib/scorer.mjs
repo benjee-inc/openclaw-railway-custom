@@ -105,6 +105,14 @@ function scoreWeather(market, altData, params, marketPrice) {
     detail += ` Google Trends: breakout interest detected.`;
   }
 
+  // Grok X/web search modifier
+  const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
+  if (grokResult.applied) {
+    impliedProb = grokResult.impliedProb;
+    confidence = Math.min(0.95, confidence + grokResult.confidenceBoost);
+    detail += grokResult.detail;
+  }
+
   const divergence = impliedProb - marketPrice;
   const alpha = Math.abs(divergence) * confidence;
   const dir = divergence > 0 ? "UNDERPRICED_YES" : "OVERPRICED_YES";
@@ -341,6 +349,18 @@ function scoreCrypto(market, altData, params, marketPrice) {
     }
   }
 
+  // Grok X/web search modifier
+  const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
+  if (grokResult.applied) {
+    if (impliedProb != null) {
+      impliedProb = grokResult.impliedProb;
+    } else {
+      impliedProb = grokResult.impliedProb;
+    }
+    confidence = Math.min(0.70, confidence + grokResult.confidenceBoost);
+    detail += grokResult.detail;
+  }
+
   if (impliedProb === null) {
     return scoreFromGdelt(altData, marketPrice, sources, 0.3);
   }
@@ -404,6 +424,14 @@ function scoreEconomics(market, altData, params, marketPrice) {
     impliedProb = metaculusResult.impliedProb;
     confidence = Math.min(0.70, confidence + metaculusResult.confidenceBoost);
     detail += metaculusResult.detail;
+  }
+
+  // Grok X/web search modifier
+  const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
+  if (grokResult.applied) {
+    impliedProb = grokResult.impliedProb;
+    confidence = Math.min(0.75, confidence + grokResult.confidenceBoost);
+    detail += grokResult.detail;
   }
 
   if (impliedProb === null) {
@@ -518,6 +546,14 @@ function scoreGeopolitics(market, altData, params, marketPrice) {
     impliedProb = metaculusResult.impliedProb;
     confidence = Math.min(0.55, confidence + metaculusResult.confidenceBoost);
     details.push(metaculusResult.detail);
+  }
+
+  // Grok X/web search modifier
+  const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
+  if (grokResult.applied) {
+    impliedProb = grokResult.impliedProb;
+    confidence = Math.min(0.60, confidence + grokResult.confidenceBoost);
+    details.push(grokResult.detail);
   }
 
   // Trends modifier
@@ -637,6 +673,14 @@ function scoreTech(market, altData, params, marketPrice) {
     details.push(metaculusResult.detail);
   }
 
+  // Grok X/web search modifier
+  const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
+  if (grokResult.applied) {
+    impliedProb = grokResult.impliedProb;
+    confidence = Math.min(0.60, confidence + grokResult.confidenceBoost);
+    details.push(grokResult.detail);
+  }
+
   // Trends modifier
   if (altData.trends?.isBreakout) {
     sources.push("trends");
@@ -680,6 +724,14 @@ function scorePoliticsGeneric(market, altData, params, marketPrice) {
     impliedProb = metaculusResult.impliedProb;
     confidence = Math.max(0.40, metaculusResult.confidenceBoost + 0.25);
     details.push(metaculusResult.detail);
+  }
+
+  // Grok X/web search modifier
+  const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
+  if (grokResult.applied) {
+    impliedProb = grokResult.impliedProb;
+    confidence = Math.min(0.55, confidence + grokResult.confidenceBoost);
+    details.push(grokResult.detail);
   }
 
   // Trends modifier
@@ -755,13 +807,23 @@ function scoreFromGdelt(altData, marketPrice, existingSources, baseConfidence) {
   if (gd.toneDelta > 1) impliedShift += 0.03;
   else if (gd.toneDelta < -1) impliedShift -= 0.03;
 
-  const impliedProb = Math.max(0.01, Math.min(0.99, marketPrice + impliedShift));
+  let impliedProb = Math.max(0.01, Math.min(0.99, marketPrice + impliedShift));
+  let confidence = baseConfidence;
+  let detail = `GDELT: ${gd.recent} articles (${gd.ratio.toFixed(1)}x volume), tone ${gd.currentTone.toFixed(1)} (delta ${gd.toneDelta > 0 ? "+" : ""}${gd.toneDelta.toFixed(1)}).`;
+
+  // Grok X/web search modifier
+  const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
+  if (grokResult.applied) {
+    impliedProb = grokResult.impliedProb;
+    confidence = Math.min(0.50, confidence + grokResult.confidenceBoost);
+    detail += grokResult.detail;
+  }
+
   const divergence = impliedProb - marketPrice;
   const direction = divergence > 0 ? "UNDERPRICED_YES" : divergence < 0 ? "OVERPRICED_YES" : "NEUTRAL";
-  const alpha = Math.abs(divergence) * baseConfidence;
-  const detail = `GDELT: ${gd.recent} articles (${gd.ratio.toFixed(1)}x volume), tone ${gd.currentTone.toFixed(1)} (delta ${gd.toneDelta > 0 ? "+" : ""}${gd.toneDelta.toFixed(1)}).`;
+  const alpha = Math.abs(divergence) * confidence;
 
-  return { divergence, direction, confidence: baseConfidence, alpha, detail, sources, altDataImplied: impliedProb };
+  return { divergence, direction, confidence, alpha, detail, sources, altDataImplied: impliedProb };
 }
 
 // ── Metaculus modifier (shared across categories) ─────────
@@ -805,6 +867,39 @@ function applyMetaculusModifier(altData, marketPrice, sources, currentImplied) {
 
   const detail = ` Metaculus: ${(mcPred * 100).toFixed(0)}% (${mc.numForecasters} forecasters, ${significance} divergence from Polymarket).`;
 
+  return { applied: true, impliedProb: newImplied, confidenceBoost, detail };
+}
+
+// ── Grok modifier (shared across categories) ──────────────
+
+function applyGrokModifier(altData, marketPrice, sources, currentImplied) {
+  if (!altData.grok) {
+    return { applied: false, impliedProb: currentImplied, confidenceBoost: 0, detail: "" };
+  }
+
+  const grok = altData.grok;
+  const grokProb = grok.probability;
+  if (grokProb == null || isNaN(grokProb)) {
+    return { applied: false, impliedProb: currentImplied, confidenceBoost: 0, detail: "" };
+  }
+
+  sources.push("grok");
+
+  const confidenceBoost = grok.confidence === "high" ? 0.10
+    : grok.confidence === "medium" ? 0.06 : 0.02;
+
+  // Blend weight: 25% default, 35% if high confidence
+  const grokWeight = grok.confidence === "high" ? 0.35
+    : grok.confidence === "medium" ? 0.25 : 0.15;
+
+  let newImplied;
+  if (currentImplied != null) {
+    newImplied = currentImplied * (1 - grokWeight) + grokProb * grokWeight;
+  } else {
+    newImplied = grokProb;
+  }
+
+  const detail = ` Grok: ${(grokProb * 100).toFixed(0)}% (${grok.confidence}). ${grok.reasoning || ""}`;
   return { applied: true, impliedProb: newImplied, confidenceBoost, detail };
 }
 

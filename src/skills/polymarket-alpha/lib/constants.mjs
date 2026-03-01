@@ -16,6 +16,7 @@ export const ARXIV_API = "https://export.arxiv.org/api/query";
 export const OPENMETEO_API = "https://api.open-meteo.com/v1/forecast";
 export const COINGLASS_API = "https://open-api.coinglass.com";
 export const METACULUS_API = "https://www.metaculus.com/api2";
+export const XAI_API = "https://api.x.ai/v1";
 
 // ── Cache TTLs (ms) ────────────────────────────────────────
 
@@ -33,6 +34,7 @@ export const TTL = {
   metaculus: 30 * 60_000,
   trends: 15 * 60_000,
   montecarlo: 5 * 60_000,
+  grok: 5 * 60_000,
 };
 
 // ── Sports filter (reused from comprehensive-scanner) ──────

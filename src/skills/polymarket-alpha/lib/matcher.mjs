@@ -52,6 +52,7 @@ function matchWeather(q) {
   sources.push("montecarlo"); // MC implied probability
   sources.push("trends");  // attention proxy
   sources.push("gdelt");   // always check news for weather events
+  sources.push("grok");    // X/Twitter + web search intelligence
   params.gdeltQuery = extractGdeltQuery(q, "weather");
   params.trendsKeyword = extractTrendsKeyword(q);
 
@@ -63,7 +64,7 @@ function matchCrypto(q) {
   const priceTarget = crypto.extractPriceTarget(q);
 
   return {
-    sources: ["coingecko", "fear_greed", "coinglass", "montecarlo", "trends", "gdelt"],
+    sources: ["coingecko", "fear_greed", "coinglass", "montecarlo", "trends", "gdelt", "grok"],
     params: {
       coins,
       priceTarget,
@@ -77,7 +78,7 @@ function matchEconomics(q) {
   const series = economics.extractSeries(q);
   const threshold = economics.extractThreshold(q);
 
-  const sources = ["metaculus", "montecarlo", "trends", "gdelt"];
+  const sources = ["metaculus", "montecarlo", "trends", "gdelt", "grok"];
   if (series.length > 0) sources.unshift("fred");
 
   return {
@@ -95,7 +96,7 @@ function matchEconomics(q) {
 function matchGeopolitics(q) {
   const zones = opensky.extractZones(q);
 
-  const sources = ["metaculus", "montecarlo", "trends", "gdelt"];
+  const sources = ["metaculus", "montecarlo", "trends", "gdelt", "grok"];
   if (zones.length > 0) sources.push("opensky");
 
   return {
@@ -111,7 +112,7 @@ function matchGeopolitics(q) {
 
 function matchPolitics(q) {
   return {
-    sources: ["metaculus", "montecarlo", "trends", "gdelt"],
+    sources: ["metaculus", "montecarlo", "trends", "gdelt", "grok"],
     params: {
       gdeltQuery: extractGdeltQuery(q, "politics"),
       metaculusQuery: extractMetaculusQuery(q),
@@ -122,7 +123,7 @@ function matchPolitics(q) {
 
 function matchTech(q) {
   const topics = arxiv.extractTopics(q);
-  const sources = ["metaculus", "montecarlo", "trends", "gdelt"];
+  const sources = ["metaculus", "montecarlo", "trends", "gdelt", "grok"];
   if (topics.length > 0) sources.push("arxiv");
 
   return {
@@ -139,7 +140,7 @@ function matchTech(q) {
 
 function matchEntertainment(q) {
   return {
-    sources: ["metaculus", "montecarlo", "trends", "gdelt"],
+    sources: ["metaculus", "montecarlo", "trends", "gdelt", "grok"],
     params: {
       gdeltQuery: extractGdeltQuery(q, "entertainment"),
       metaculusQuery: extractMetaculusQuery(q),
@@ -150,7 +151,7 @@ function matchEntertainment(q) {
 
 function matchGeneric(q) {
   return {
-    sources: ["metaculus", "montecarlo", "trends", "gdelt"],
+    sources: ["metaculus", "montecarlo", "trends", "gdelt", "grok"],
     params: {
       gdeltQuery: extractGdeltQuery(q, "general"),
       metaculusQuery: extractMetaculusQuery(q),
@@ -391,6 +392,15 @@ export async function fetchAltData(market, matchResult) {
             SOURCE_TIMEOUT, "gdelt",
           ));
         }
+        break;
+
+      case "grok":
+        promises.push(withTimeout(
+          import("./sources/grok.mjs")
+            .then((g) => g.analyzeMarket(market.question, market._category, market.prices?.[0] || 0.5))
+            .then((r) => { if (r) data.grok = r; }),
+          SOURCE_TIMEOUT, "grok",
+        ));
         break;
     }
   }
