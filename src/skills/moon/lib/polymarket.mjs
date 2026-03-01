@@ -160,6 +160,7 @@ export async function getMarket(conditionId) {
     closed: m.closed,
     acceptingOrders: m.accepting_orders,
     outcomes: tokens.map(t => t.outcome),
+    tokens: tokens.map(t => ({ outcome: t.outcome, winner: t.winner, price: t.price, token_id: t.token_id })),
     tags: m.tags,
     rewards: m.rewards,
   };
@@ -260,6 +261,46 @@ export async function cancelAllOrders() {
     const { clobClient } = await getPolyClient();
     return await clobClient.cancelAll();
   });
+}
+
+// ─── Redemption (resolved markets) ──────────────────────────────────────────
+
+const CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"; // Conditional Tokens Framework on Polygon
+const NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"; // NegRisk adapter
+const USDC_DECIMALS = 6;
+const CTF_ABI = [
+  "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets) external",
+];
+const NEG_RISK_ABI = [
+  "function redeemPositions(bytes32 conditionId, uint256[] amounts) external",
+];
+const USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com";
+
+export async function redeemPosition(conditionId, negRisk = false) {
+  const pk = requireEnv("POLYMARKET_PRIVATE_KEY", "Need POLYMARKET_PRIVATE_KEY to redeem");
+  const ethers = await getEthers();
+  const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+  const wallet = new ethers.Wallet(pk, provider);
+
+  if (negRisk) {
+    const adapter = new ethers.Contract(NEG_RISK_ADAPTER, NEG_RISK_ABI, wallet);
+    // For neg risk markets, pass empty amounts array — contract calculates
+    const tx = await adapter.redeemPositions(conditionId, []);
+    const receipt = await tx.wait();
+    return { success: true, txHash: receipt.hash, gasUsed: receipt.gasUsed?.toString() };
+  } else {
+    const ctf = new ethers.Contract(CTF_ADDRESS, CTF_ABI, wallet);
+    // indexSets: [1, 2] = YES (0b01) and NO (0b10) outcomes
+    const tx = await ctf.redeemPositions(
+      USDC_POLYGON,
+      "0x0000000000000000000000000000000000000000000000000000000000000000",
+      conditionId,
+      [1, 2],
+    );
+    const receipt = await tx.wait();
+    return { success: true, txHash: receipt.hash, gasUsed: receipt.gasUsed?.toString() };
+  }
 }
 
 // ─── Trade History & Positions ──────────────────────────────────────────────

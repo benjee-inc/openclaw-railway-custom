@@ -666,17 +666,58 @@ async function autoTakeProfit() {
     const positions = await res.json();
     if (!Array.isArray(positions)) return [];
 
-    const { getMarket, placeBet } = await import("./lib/polymarket.mjs");
+    const { getMarket, placeBet, redeemPosition } = await import("./lib/polymarket.mjs");
 
     for (const p of positions) {
       const pnlPct = parseFloat(p.percentPnl || 0);
       const size = parseFloat(p.size || 0);
       const curPrice = parseFloat(p.curPrice || 0);
-      if (size <= 0 || curPrice <= 0) continue;
+      if (size <= 0) continue;
 
       // Silently skip dust positions — not worth logging every cycle
       const posValue = size * curPrice;
-      if (posValue < 0.50) continue;
+      if (curPrice > 0 && posValue < 0.50) continue;
+
+      const cid = p.conditionId;
+      const title = (p.title || "").slice(0, 55);
+      const outcome = (p.outcome || "Yes").toLowerCase();
+
+      // Auto-redeem: if market is resolved, try to redeem winning positions
+      try {
+        const market = await getMarket(cid);
+        if (market.closed) {
+          // Check if we hold the winning outcome
+          const winnerToken = (market.clobTokenIds || []).find((_, i) =>
+            market.outcomes?.[i] && (market.tokens || [])[i]?.winner
+          );
+          // Use CLOB tokens data to check winner
+          const tokens = market.tokens || [];
+          const ourIdx = outcome === "yes" ? 0 : 1;
+          const isWinner = tokens[ourIdx]?.winner;
+
+          if (isWinner && size > 0) {
+            console.log(`[auto-redeem] Redeeming ${size.toFixed(1)} winning ${outcome.toUpperCase()} shares of "${title}"`);
+            try {
+              const result = await redeemPosition(cid, market.negRisk);
+              entries.push({
+                timestamp: new Date().toISOString(),
+                type: "trade",
+                message: `[auto-redeem] Redeemed ${outcome.toUpperCase()} ${size.toFixed(1)} shares of "${title}" → tx=${result.txHash}`,
+              });
+            } catch (err) {
+              console.error(`[auto-redeem] failed "${title}": ${err.message}`);
+            }
+          }
+          // Skip further sell logic for closed markets
+          await new Promise(r => setTimeout(r, 1500));
+          continue;
+        }
+      } catch (err) {
+        console.error(`[auto-redeem] market check failed "${title}": ${err.message}`);
+        continue;
+      }
+
+      if (curPrice <= 0) continue;
 
       // Determine if we should sell: take profit OR stop loss
       const isTakeProfit = pnlPct >= TAKE_PROFIT_PCT;
@@ -685,23 +726,12 @@ async function autoTakeProfit() {
 
       // Never sell too cheap — if price is below MIN_EXIT_PRICE, the spread
       // will eat most of the proceeds. Better to hold and let it resolve.
-      if (curPrice < MIN_EXIT_PRICE) {
-        entries.push({
-          timestamp: new Date().toISOString(),
-          type: "palpha",
-          message: `[auto-sell] SKIP: "${(p.title || "").slice(0, 55)}" price ${(curPrice * 100).toFixed(1)}¢ below min exit ${(MIN_EXIT_PRICE * 100).toFixed(1)}¢ — holding to expiry`,
-        });
-        continue;
-      }
+      if (curPrice < MIN_EXIT_PRICE) continue; // silently skip sub-penny positions
 
-      const cid = p.conditionId;
-      const title = (p.title || "").slice(0, 55);
-      const outcome = (p.outcome || "Yes").toLowerCase();
       const sellReason = isTakeProfit ? "TAKE PROFIT" : "STOP LOSS";
 
       try {
         const market = await getMarket(cid);
-        if (market.closed) continue;
 
         const tokenIdx = outcome === "yes" ? 0 : 1;
         const tokenId = market.clobTokenIds?.[tokenIdx];
