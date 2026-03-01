@@ -23,7 +23,7 @@ import { buildGraph, detectViolations, detectViolationsAsync } from "../../polym
 // ── Constants ────────────────────────────────────────────
 
 const MAX_PER_TRADE = 20;       // $20 USDC
-const MAX_PER_DAY = 100;        // $100 USDC
+const MAX_PER_DAY = Infinity;   // no daily limit
 const MIN_LIQUIDITY = 50_000;   // $50K default
 const MIN_LIQUIDITY_WEATHER = 10_000; // $10K for weather markets
 const MAX_TRADES_PER_INVOCATION = 3;
@@ -586,15 +586,7 @@ export async function cmdAutoTrade(args, opts = {}) {
     });
   }
 
-  // 4. Check daily budget
-  if (atState.dailySpend >= maxDay) {
-    const msg = `Daily limit reached: $${atState.dailySpend.toFixed(2)}/$${maxDay}`;
-    const entries = [{ timestamp: new Date().toISOString(), type: "palpha", message: `[auto-trade] ${msg}` }];
-    if (!skipDashboardPush) await pushToDashboard(entries);
-    return out({ message: msg, tradesExecuted: [], skipped: [], dailySpend: atState.dailySpend, dashEntries: skipDashboardPush ? entries : undefined });
-  }
-
-  // 5. Prune expired cooldowns
+  // 4. Prune expired cooldowns
   pruneAutoTraderCooldowns();
 
   const { markets, signals, tradeFlows, midShifts } = signalData;
@@ -696,9 +688,9 @@ export async function cmdAutoTrade(args, opts = {}) {
   }
   if (tradesExecuted.length === 0 && skipped.length > 0) {
     const reasons = [...new Set(skipped.map(s => s.reason))].join(", ");
-    dashEntries.push({ timestamp: iso(), type: "trade", message: `[auto-trade] No trades: ${reasons}. Daily: $${currentSpend.toFixed(2)}/$${maxDay}` });
+    dashEntries.push({ timestamp: iso(), type: "trade", message: `[auto-trade] No trades: ${reasons}. Daily: $${currentSpend.toFixed(2)}` });
   } else if (tradesExecuted.length === 0 && skipped.length === 0) {
-    dashEntries.push({ timestamp: iso(), type: "palpha", message: `[auto-trade] Cycle ${signalData.cycle || "?"}: ${rawOpportunities.length} raw opps, ${opportunities.length} after enrichment, ${palphaVetoed} vetoed. No actionable trades. Daily: $${currentSpend.toFixed(2)}/$${maxDay}` });
+    dashEntries.push({ timestamp: iso(), type: "palpha", message: `[auto-trade] Cycle ${signalData.cycle || "?"}: ${rawOpportunities.length} raw opps, ${opportunities.length} after enrichment, ${palphaVetoed} vetoed. No actionable trades. Daily: $${currentSpend.toFixed(2)}` });
   }
   if (!skipDashboardPush) await pushToDashboard(dashEntries);
 
