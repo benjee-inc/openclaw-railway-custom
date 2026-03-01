@@ -23,7 +23,7 @@ import { buildGraph, detectViolations, detectViolationsAsync } from "../../polym
 // ── Constants ────────────────────────────────────────────
 
 const MAX_PER_TRADE = 20;       // $20 USDC
-const MAX_PER_DAY = 50;         // $50 USDC
+const MAX_PER_DAY = 100;        // $100 USDC
 const MIN_LIQUIDITY = 50_000;   // $50K default
 const MIN_LIQUIDITY_WEATHER = 10_000; // $10K for weather markets
 const MAX_TRADES_PER_INVOCATION = 3;
