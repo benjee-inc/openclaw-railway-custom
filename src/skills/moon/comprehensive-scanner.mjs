@@ -674,6 +674,10 @@ async function autoTakeProfit() {
       const curPrice = parseFloat(p.curPrice || 0);
       if (size <= 0 || curPrice <= 0) continue;
 
+      // Silently skip dust positions — not worth logging every cycle
+      const posValue = size * curPrice;
+      if (posValue < 0.50) continue;
+
       // Determine if we should sell: take profit OR stop loss
       const isTakeProfit = pnlPct >= TAKE_PROFIT_PCT;
       const isStopLoss = pnlPct <= STOP_LOSS_PCT;
