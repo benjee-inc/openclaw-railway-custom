@@ -25,7 +25,7 @@ import { fetchOrderBook, analyzeDepth } from "../../polymarket-alpha/lib/depth.m
 // ── Constants ────────────────────────────────────────────
 
 const MAX_PER_TRADE = 20;       // $20 USDC
-const MAX_PER_DAY = 50;         // $50 USDC daily limit
+const MAX_PER_DAY = Infinity;   // No daily limit
 const MIN_LIQUIDITY = 200_000;  // $200K minimum liquidity
 const MIN_LIQUIDITY_WEATHER = 50_000; // $50K for weather markets
 const MAX_TRADES_PER_INVOCATION = 3;
