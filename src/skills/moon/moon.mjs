@@ -12,6 +12,7 @@ import {
   cmdJournal, cmdWatch, cmdCalc, cmdReview,
   cmdMarket, cmdOdds, cmdBet, cmdRedeem,
 } from "./lib/commands.mjs";
+import { cmdAutoTrade } from "./lib/auto-trade-cmd.mjs";
 
 // ─── Help ───────────────────────────────────────────────────────────────────
 
@@ -75,6 +76,9 @@ PREDICTION MARKETS (Polymarket, requires POLYMARKET_PRIVATE_KEY):
   moon bet <id> <yes|no> <$amt> --limit 0.65  Limit order
   moon redeem <conditionId>             Check/redeem resolved position
   moon redeem list                      Redeemable positions
+  moon auto-trade [--dry-run]           Execute trades from scanner signals (palpha-gated)
+  moon auto-trade --budget 100          Override daily budget
+  moon auto-trade --max-trades 5        Override per-invocation cap
 
 REVIEW:
   moon review                              Full portfolio + goal progress + alerts
@@ -129,6 +133,7 @@ const COMMANDS = {
   odds: cmdOdds,
   bet: cmdBet,
   redeem: cmdRedeem,
+  "auto-trade": cmdAutoTrade,
 };
 
 async function main() {

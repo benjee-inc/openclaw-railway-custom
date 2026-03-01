@@ -223,6 +223,17 @@ moon market cancel all                   # Cancel all open orders
 moon market trades --last 10             # Recent trade history
 ```
 
+### Auto-Trading (scanner → palpha → execute)
+
+```bash
+moon auto-trade                       # Execute trades from scanner signals (palpha-gated)
+moon auto-trade --dry-run             # Preview opportunities without executing
+moon auto-trade --budget 100          # Override daily budget ($50 default)
+moon auto-trade --max-trades 5        # Override per-invocation cap (3 default)
+```
+
+Reads `/data/.moon/signals.json` written by the scanner each cycle. Evaluates signals, validates with palpha (alt-data scoring + orderbook depth analysis), applies guardrails (daily budget, cooldowns, position dedup), then executes via CLOB. Only ACTIONABLE/NOTABLE palpha recommendations pass through.
+
 ### Redemption & P&L
 
 ```bash
@@ -298,9 +309,8 @@ When running autonomously (cron sessions, no user present), you may place trades
 - Contrarian bets are fine if you have a thesis
 
 ### Process (autonomous)
-1. Review scanner output and current positions
-2. Pick an opportunity worth trading
-3. Check liquidity (must be > $50K)
-4. Size the bet ($5-$20 range, respect daily cap)
-5. Execute via `moon bet` with `--note` explaining your thesis
-6. Log the decision to the dashboard
+1. Run `moon auto-trade` — reads scanner signals, validates with palpha alt-data scoring + orderbook depth, applies guardrails, executes trades
+2. Review the JSON output: check `tradesExecuted` for what was placed, `skipped` for why others were rejected, `vetoed` for palpha rejections
+3. Do NOT independently search for markets or make ad-hoc `moon bet` calls — all trading flows through `moon auto-trade`
+4. Use `--dry-run` to preview what would trade without executing: `moon auto-trade --dry-run`
+5. Portfolio review is still allowed: `moon market positions`, `moon market orders`, `moon redeem list`

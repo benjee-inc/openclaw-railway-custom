@@ -18,6 +18,13 @@ const DEFAULT_STATE = {
   narratives: {},
   scanHistory: [],
   polymarketBets: [],
+  autoTrader: {
+    dailyDate: null,      // "2026-03-01" — resets spend at midnight UTC
+    dailySpend: 0,
+    dailyTrades: 0,
+    recentTrades: {},     // { conditionId: timestampMs } — 30min cooldown
+    lastCycle: null,      // prevent processing same cycle twice
+  },
 };
 
 // ─── Path Resolution ────────────────────────────────────────────────────────
@@ -187,4 +194,64 @@ export function updateConfig(updates) {
   state.config = { ...state.config, ...updates };
   saveState(state);
   return state.config;
+}
+
+// ─── Auto-Trader State ──────────────────────────────────────────────────────
+
+const TRADE_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
+
+export function getAutoTraderState() {
+  const state = loadState();
+  const at = state.autoTrader || {};
+  const today = new Date().toISOString().slice(0, 10);
+  // Reset daily counters if date changed
+  if (at.dailyDate !== today) {
+    return { dailyDate: today, dailySpend: 0, dailyTrades: 0, recentTrades: {}, lastCycle: at.lastCycle };
+  }
+  return at;
+}
+
+export function canAutoTrade(amount, maxPerDay = 50) {
+  const at = getAutoTraderState();
+  return at.dailySpend + amount <= maxPerDay;
+}
+
+export function recordAutoTrade(conditionId, amount) {
+  const state = loadState();
+  const today = new Date().toISOString().slice(0, 10);
+  if (!state.autoTrader || state.autoTrader.dailyDate !== today) {
+    state.autoTrader = { dailyDate: today, dailySpend: 0, dailyTrades: 0, recentTrades: {}, lastCycle: state.autoTrader?.lastCycle };
+  }
+  state.autoTrader.dailySpend += amount;
+  state.autoTrader.dailyTrades += 1;
+  state.autoTrader.recentTrades[conditionId] = Date.now();
+  saveState(state);
+}
+
+export function setAutoTraderLastCycle(cycleId) {
+  const state = loadState();
+  if (!state.autoTrader) state.autoTrader = {};
+  state.autoTrader.lastCycle = cycleId;
+  saveState(state);
+}
+
+export function pruneAutoTraderCooldowns() {
+  const state = loadState();
+  if (!state.autoTrader?.recentTrades) return;
+  const cutoff = Date.now() - TRADE_COOLDOWN_MS;
+  let changed = false;
+  for (const [id, ts] of Object.entries(state.autoTrader.recentTrades)) {
+    if (ts < cutoff) {
+      delete state.autoTrader.recentTrades[id];
+      changed = true;
+    }
+  }
+  if (changed) saveState(state);
+}
+
+export function isRecentlyAutoTraded(conditionId) {
+  const at = getAutoTraderState();
+  const ts = at.recentTrades?.[conditionId];
+  if (!ts) return false;
+  return (Date.now() - ts) < TRADE_COOLDOWN_MS;
 }

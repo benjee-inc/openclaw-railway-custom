@@ -9,19 +9,9 @@
  * Pushes JSONL entries to GitHub Pages dashboard repo every cycle.
  */
 
-// Auto-trader loaded lazily to avoid pulling moon-lib dependency chain at startup
-let _autoTrader = null;
-async function getAutoTrader() {
-  if (!_autoTrader) {
-    try {
-      _autoTrader = await import("./auto-trader.mjs");
-    } catch (err) {
-      console.error(`[scanner] auto-trader import failed: ${err.message}`);
-      _autoTrader = { processSignals: async () => [] };
-    }
-  }
-  return _autoTrader;
-}
+import { writeFileSync, mkdirSync, renameSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 const DATA_API = "https://data-api.polymarket.com";
@@ -542,6 +532,37 @@ async function pushJsonl(token, repo, sha, entries) {
   }
 }
 
+// ── Write signals to disk for auto-trade CLI ─────────────
+
+function getSignalDir() {
+  if (process.env.MOON_STATE_DIR) return process.env.MOON_STATE_DIR;
+  if (existsSync("/data")) return "/data/.moon";
+  return join(homedir(), ".moon");
+}
+
+function writeSignalsToFile(markets, signals, tradeFlows, midShifts) {
+  try {
+    const dir = getSignalDir();
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "signals.json");
+    const tmp = file + ".tmp";
+    const intervalMs = Number(env("SCANNER_INTERVAL_MS", String(DEFAULT_INTERVAL_MS)));
+    const data = {
+      cycle: cycleCount,
+      timestamp: iso(),
+      staleAfterMs: intervalMs * 2, // stale after 2x interval
+      markets,
+      signals,
+      tradeFlows,
+      midShifts,
+    };
+    writeFileSync(tmp, JSON.stringify(data), "utf-8");
+    renameSync(tmp, file);
+  } catch (err) {
+    console.error(`[scanner] signal file write error: ${err.message}`);
+  }
+}
+
 // ── Scan cycle ───────────────────────────────────────────
 
 async function runScanCycle() {
@@ -550,7 +571,6 @@ async function runScanCycle() {
   if (!token) return;
 
   let newEntries = [];
-  let tradeEntries = [];
 
   try {
     // Fetch all data sources in parallel
@@ -574,31 +594,21 @@ async function runScanCycle() {
 
     newEntries = buildEntries(markets, signals, tradeFlows, midShifts);
 
-    // Auto-trader: convert signals into real trades
-    const autoTraderEnabled = env("AUTO_TRADER_ENABLED", "true").toLowerCase() !== "false";
-    if (autoTraderEnabled && env("POLYMARKET_PRIVATE_KEY")) {
-      try {
-        const { processSignals } = await getAutoTrader();
-        tradeEntries = await processSignals({ markets, signals, tradeFlows });
-      } catch (err) {
-        console.error(`[auto-trader] cycle error: ${err.message}`);
-        tradeEntries = [{ timestamp: iso(), type: "trade", message: `[auto-trader] Error: ${err.message}` }];
-      }
-    }
+    // Write structured signals to disk for moon auto-trade
+    writeSignalsToFile(markets, signals, tradeFlows, midShifts);
   } catch (err) {
     console.error(`[scanner] cycle error: ${err.message}`);
     newEntries = [entry("scan", `Error: ${err.message}`)];
   }
 
-  // Push to GitHub (scanner entries + trade entries)
+  // Push to GitHub (scanner entries only)
   try {
     const { sha, entries: existing } = await getExistingJsonl(token, repo);
     const parsedNew = newEntries.map((e) => typeof e === "string" ? JSON.parse(e) : e);
-    const combined = [...existing, ...parsedNew, ...tradeEntries];
+    const combined = [...existing, ...parsedNew];
     const trimmed = combined.slice(-MAX_ENTRIES);
     await pushJsonl(token, repo, sha, trimmed);
-    const tradeCount = tradeEntries.filter(e => e.message?.includes("EXECUTED")).length;
-    console.log(`[scanner] pushed ${newEntries.length} scan + ${tradeEntries.length} trade entries (${tradeCount} trades executed, total: ${trimmed.length})`);
+    console.log(`[scanner] pushed ${newEntries.length} scan entries (total: ${trimmed.length})`);
   } catch (err) {
     console.error(`[scanner] GitHub push error: ${err.message}`);
   }
