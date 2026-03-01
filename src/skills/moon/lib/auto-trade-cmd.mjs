@@ -28,6 +28,46 @@ const MIN_LIQUIDITY = 50_000;   // $50K
 const MAX_TRADES_PER_INVOCATION = 3;
 const MIN_TRADE = 5;            // $5 minimum
 const DEFAULT_STALE_MS = 600_000; // 10 minutes
+const DEFAULT_REPO = "benjee-inc/polymarket-arb-dashboard";
+const JSONL_PATH = "logs/terminal.jsonl";
+const MAX_JSONL_ENTRIES = 200;
+
+// ── GitHub JSONL push (dashboard) ────────────────────────
+
+async function pushToDashboard(dashEntries) {
+  const token = process.env.GITHUB_TOKEN?.trim();
+  const repo = process.env.SCANNER_REPO?.trim() || DEFAULT_REPO;
+  if (!token || dashEntries.length === 0) return;
+
+  try {
+    // Get existing
+    const getUrl = `https://api.github.com/repos/${repo}/contents/${JSONL_PATH}`;
+    const getRes = await fetch(getUrl, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    let sha = null;
+    let existing = [];
+    if (getRes.ok) {
+      const data = await getRes.json();
+      sha = data.sha;
+      existing = Buffer.from(data.content, "base64").toString("utf8")
+        .split("\n").filter(l => l.trim()).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    }
+
+    const combined = [...existing, ...dashEntries].slice(-MAX_JSONL_ENTRIES);
+    const content = Buffer.from(combined.map(e => JSON.stringify(e)).join("\n") + "\n").toString("base64");
+    await fetch(getUrl, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json", "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "auto-trade results", content, ...(sha ? { sha } : {}) }),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (err) {
+    // Non-fatal
+    console.error(`[auto-trade] dashboard push error: ${err.message}`);
+  }
+}
 
 // ── Signal file reading ──────────────────────────────────
 
@@ -570,7 +610,25 @@ export async function cmdAutoTrade(args) {
     setAutoTraderLastCycle(signalData.cycle);
   }
 
-  // 11. Output
+  // 11. Push palpha + trade entries to dashboard
+  const iso = () => new Date().toISOString();
+  const dashEntries = [];
+  for (const msg of log) {
+    dashEntries.push({ timestamp: iso(), type: "palpha", message: msg });
+  }
+  for (const t of tradesExecuted) {
+    let msg = `[auto-trade] EXECUTED: ${t.outcome} $${t.amount} on "${(t.question || "").slice(0, 50)}" @ ${(t.entryPrice * 100).toFixed(1)}% | ${t.reason}`;
+    if (t.palphaRec) msg += ` | palpha=${t.palphaRec}`;
+    msg += ` | order=${t.orderId || "n/a"}`;
+    dashEntries.push({ timestamp: iso(), type: "trade", message: msg });
+  }
+  if (tradesExecuted.length === 0 && skipped.length > 0) {
+    const reasons = [...new Set(skipped.map(s => s.reason))].join(", ");
+    dashEntries.push({ timestamp: iso(), type: "trade", message: `[auto-trade] No trades: ${reasons}. Daily: $${currentSpend.toFixed(2)}/$${maxDay}` });
+  }
+  await pushToDashboard(dashEntries);
+
+  // 12. Output
   const finalState = getAutoTraderState();
   out({
     cycle: signalData.cycle,
