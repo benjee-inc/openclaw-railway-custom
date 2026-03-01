@@ -27,6 +27,11 @@ function scoreWeather(market, altData, params, marketPrice) {
     return scoreFromGdelt(altData, marketPrice, ["nws"], 0.4);
   }
 
+  // If we have NWS data but no threshold, try to score from forecast text
+  if (!params.threshold && altData.nws) {
+    return scoreWeatherFromForecastText(market, altData, marketPrice);
+  }
+
   if (!params.threshold) {
     return scoreFromGdelt(altData, marketPrice, ["nws"], 0.4);
   }
@@ -104,6 +109,55 @@ function scoreWeather(market, altData, params, marketPrice) {
   const alpha = Math.abs(divergence) * confidence;
   const dir = divergence > 0 ? "UNDERPRICED_YES" : "OVERPRICED_YES";
 
+  return { divergence, direction: dir, confidence, alpha, detail, sources, altDataImplied: impliedProb };
+}
+
+function scoreWeatherFromForecastText(market, altData, marketPrice) {
+  const sources = ["nws"];
+  const q = (market.question || "").toLowerCase();
+  const periods = altData.nws?.periods || [];
+  if (periods.length === 0) return scoreFromGdelt(altData, marketPrice, sources, 0.4);
+
+  const forecasts = periods.map(p => (p.detailedForecast || p.shortForecast || "").toLowerCase()).join(" ");
+  let impliedProb = null;
+  let detail = "";
+  let confidence = 0.55;
+
+  // Snow detection
+  if (q.includes("snow")) {
+    const hasSnow = /snow|blizzard|wintry mix|ice storm/.test(forecasts);
+    const heavySnow = /heavy snow|significant snow|blizzard|6.* inches|8.* inches|\d{2}.* inches/.test(forecasts);
+    if (heavySnow) { impliedProb = 0.85; detail = "NWS: heavy snow in forecast."; }
+    else if (hasSnow) { impliedProb = 0.65; detail = "NWS: snow mentioned in forecast."; }
+    else { impliedProb = 0.10; detail = "NWS: no snow in forecast."; confidence = 0.6; }
+  }
+  // Rain detection
+  else if (q.includes("rain") || q.includes("precipitation")) {
+    const hasRain = /rain|showers|thunderstorm|precipitation/.test(forecasts);
+    if (hasRain) { impliedProb = 0.70; detail = "NWS: rain/precipitation in forecast."; }
+    else { impliedProb = 0.15; detail = "NWS: no precipitation in forecast."; confidence = 0.6; }
+  }
+  // Generic severe weather
+  else if (q.includes("tornado") || q.includes("hurricane") || q.includes("storm")) {
+    const hasSevere = /tornado|hurricane|tropical storm|severe thunderstorm|damaging wind/.test(forecasts);
+    if (hasSevere) { impliedProb = 0.60; detail = "NWS: severe weather signals in forecast."; confidence = 0.45; }
+    else { impliedProb = 0.10; detail = "NWS: no severe weather in forecast."; confidence = 0.5; }
+  }
+
+  if (impliedProb === null) {
+    return scoreFromGdelt(altData, marketPrice, sources, 0.4);
+  }
+
+  if (altData.ensemble) { sources.push("ensemble"); confidence = Math.min(0.7, confidence + 0.05); }
+  if (altData.montecarlo?.mcImplied != null) {
+    sources.push("montecarlo");
+    impliedProb = impliedProb * 0.6 + altData.montecarlo.mcImplied * 0.4;
+    confidence = Math.min(0.75, confidence + 0.05);
+  }
+
+  const divergence = impliedProb - marketPrice;
+  const alpha = Math.abs(divergence) * confidence;
+  const dir = divergence > 0 ? "UNDERPRICED_YES" : "OVERPRICED_YES";
   return { divergence, direction: dir, confidence, alpha, detail, sources, altDataImplied: impliedProb };
 }
 

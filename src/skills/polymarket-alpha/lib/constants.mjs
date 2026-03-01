@@ -71,6 +71,19 @@ export const SPORTS_PATTERNS = [
   // Generic sports outcome patterns
   /\bwin\s+the\s+(?:division|conference|championship|title|cup|trophy|medal|ring)\b/i,
   /\bmake\s+the\s+(?:playoffs|postseason|final|finals|semis|quarterfinals)\b/i,
+  // Additional international leagues
+  /\bSüper Lig\b/i, /\bSuper Lig\b/i, /\bEredivisie\b/i, /\bLiga MX\b/i,
+  /\bJ[\s-]?League\b/i, /\bK[\s-]?League\b/i, /\bA[\s-]?League\b/i,
+  /\bPrimeira Liga\b/i, /\bScottish Premiership\b/i, /\bAllsvenskan\b/i,
+  /\bEliteserien\b/i, /\bSuperliga\b/i, /\bEkstraklasa\b/i,
+  /\bRSL\b/i, /\bMLS Cup\b/i, /\bCopa Libertadores\b/i,
+  /\bCopa America\b/i, /\bAfcon\b/i, /\bCAF\b/i,
+  // Generic "Will [team] win the [league]?" pattern
+  /\bwin\s+the\s+\S+\s+(?:Lig|Liga|League|Serie|Division|Cup|Championship)\b/i,
+  /\bfinish\s+in\s+the\s+top\s+\d+\b/i,
+  // EPL team names
+  /\b(?:EPL|English Premier League)\b/i,
+  /\b\d{4}[–-]\d{2,4}\s+(?:season|campaign)\b/i,
 ];
 
 // ── Category keyword dictionaries ──────────────────────────

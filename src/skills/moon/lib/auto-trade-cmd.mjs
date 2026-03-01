@@ -14,17 +14,18 @@ import { getMarket, placeBet, placeLimitBet } from "./polymarket.mjs";
 
 // ── Palpha imports (direct — CLI resolves all deps) ──────
 
-import { categorize } from "../../polymarket-alpha/lib/categorizer.mjs";
+import { categorize, isSportsMarket } from "../../polymarket-alpha/lib/categorizer.mjs";
 import { match, fetchAltData } from "../../polymarket-alpha/lib/matcher.mjs";
 import { score, recommendation } from "../../polymarket-alpha/lib/scorer.mjs";
 import { fetchOrderBook, analyzeDepth } from "../../polymarket-alpha/lib/depth.mjs";
-import { buildGraph, detectViolations } from "../../polymarket-alpha/lib/network.mjs";
+import { buildGraph, detectViolations, detectViolationsAsync } from "../../polymarket-alpha/lib/network.mjs";
 
 // ── Constants ────────────────────────────────────────────
 
 const MAX_PER_TRADE = 20;       // $20 USDC
 const MAX_PER_DAY = 50;         // $50 USDC
-const MIN_LIQUIDITY = 50_000;   // $50K
+const MIN_LIQUIDITY = 50_000;   // $50K default
+const MIN_LIQUIDITY_WEATHER = 10_000; // $10K for weather markets
 const MAX_TRADES_PER_INVOCATION = 3;
 const MIN_TRADE = 5;            // $5 minimum
 const DEFAULT_STALE_MS = 600_000; // 10 minutes
@@ -99,6 +100,11 @@ function sizePosition(score, signalType, dailySpend, maxDay) {
 
 // ── Signal evaluation (transplanted from auto-trader.mjs) ─
 
+function getMinLiquidity(question) {
+  const { category } = categorize(question || "");
+  return category === "weather" ? MIN_LIQUIDITY_WEATHER : MIN_LIQUIDITY;
+}
+
 function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
   const opportunities = [];
 
@@ -122,7 +128,8 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
   for (const flow of tradeFlows) {
     if (flow.imbalance < 0.6 || flow.total < 2000) continue;
     const market = resolveMarket(flow);
-    if (!market || market.liquidity < MIN_LIQUIDITY) continue;
+    if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
+    if (isSportsMarket(flow.q || market.question || "")) continue;
     const condId = flow.conditionId || market.conditionId;
     if (!condId) continue;
 
@@ -142,8 +149,9 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
   for (const m of (signals.movers1h || [])) {
     if (!m.conditionId) continue;
     const market = marketMap.get(m.conditionId);
-    if (!market || market.liquidity < MIN_LIQUIDITY) continue;
+    if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
     if (m.price > 0.95 || m.price < 0.05) continue;
+    if (isSportsMarket(m.q || market.question || "")) continue;
 
     const outcome = m.change1h > 0 ? "yes" : "no";
     const amount = sizePosition(Math.abs(m.change1h), "momentum", dailySpend, maxDay);
@@ -161,8 +169,9 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
   for (const m of (signals.wideSpread || [])) {
     if (!m.conditionId) continue;
     const market = marketMap.get(m.conditionId);
-    if (!market || market.liquidity < MIN_LIQUIDITY) continue;
+    if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
     if (m.spread < 0.05) continue;
+    if (isSportsMarket(m.q || market.question || "")) continue;
 
     const midpoint = (m.bid + m.ask) / 2;
     const amount = sizePosition(m.score, "spread", dailySpend, maxDay);
@@ -181,9 +190,12 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
   for (const m of (signals.catalysts || [])) {
     if (!m.conditionId) continue;
     const market = marketMap.get(m.conditionId);
-    if (!market || market.liquidity < MIN_LIQUIDITY) continue;
-    if (m.price >= 0.30 && m.price <= 0.70) continue;
+    if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
+    // Weather markets in the 30-70% range are tradeable — NWS data provides edge
+    const isWeather = categorize(market.question || "").category === "weather";
+    if (!isWeather && m.price >= 0.30 && m.price <= 0.70) continue;
     if (m.hrsLeft > 48) continue;
+    if (isSportsMarket(m.q || market.question || "")) continue;
 
     const outcome = m.price > 0.5 ? "yes" : "no";
     const amount = sizePosition(m.score, "catalyst", dailySpend, maxDay);
@@ -323,13 +335,16 @@ async function detectNetworkSignals(markets, dailySpend, maxDay) {
 
   const categorized = markets
     .filter((m) => m.conditionId && m.question && m.prices?.length > 0)
+    .filter((m) => !isSportsMarket(m.question)) // Block all sports markets
     .map((m) => {
       const { category } = categorize(m.question);
+      if (category === "sports") return null; // Double-check via categorizer
       return { ...m, _category: category };
-    });
+    })
+    .filter(Boolean);
 
   const graph = buildGraph(categorized);
-  const violations = detectViolations(graph);
+  const violations = await detectViolationsAsync(graph);
 
   if (violations.length > 0) {
     entries.push(`[network] ${violations.length} structural violations across ${graph.nodeCount()} markets.`);
@@ -339,7 +354,7 @@ async function detectNetworkSignals(markets, dailySpend, maxDay) {
     if (v.type === "threshold_monotonicity") {
       const conditionId = v.markets[0];
       const market = markets.find((m) => m.conditionId === conditionId);
-      if (!market || market.liquidity < MIN_LIQUIDITY) continue;
+      if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
       const amount = sizePosition(v.severity * 10000, "flow", dailySpend, maxDay);
       if (amount < MIN_TRADE || dailySpend + amount > maxDay) continue;
 
@@ -353,7 +368,7 @@ async function detectNetworkSignals(markets, dailySpend, maxDay) {
     } else if (v.type === "complement_deviation" && v.deviation < -0.03) {
       const conditionId = v.markets[0];
       const market = markets.find((m) => m.conditionId === conditionId);
-      if (!market || market.liquidity < MIN_LIQUIDITY) continue;
+      if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
       const outcome = v.yesPrice <= v.noPrice ? "yes" : "no";
       const amount = sizePosition(Math.abs(v.deviation) * 10000, "spread", dailySpend, maxDay);
       if (amount < MIN_TRADE || dailySpend + amount > maxDay) continue;
@@ -369,7 +384,7 @@ async function detectNetworkSignals(markets, dailySpend, maxDay) {
       const [id1, id2] = v.markets;
       const cheaperId = v.prices[0] < v.prices[1] ? id1 : id2;
       const market = markets.find((m) => m.conditionId === cheaperId);
-      if (!market || market.liquidity < MIN_LIQUIDITY) continue;
+      if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
       const amount = sizePosition(v.severity * 5000, "momentum", dailySpend, maxDay);
       if (amount < MIN_TRADE || dailySpend + amount > maxDay) continue;
 

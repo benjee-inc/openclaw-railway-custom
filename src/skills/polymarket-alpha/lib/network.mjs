@@ -177,6 +177,114 @@ export function buildGraph(markets) {
   return graph;
 }
 
+// ── Mutual exclusivity detection (AI-powered + fast heuristic fallback) ────
+
+// Cache to avoid repeated LLM calls for the same pair
+const _mexCache = new Map();
+const _MEX_CACHE_TTL = 3600_000; // 1 hour
+
+/**
+ * AI-powered mutual exclusivity check.
+ * Uses a fast/cheap model via OpenRouter to determine if two markets
+ * are mutually exclusive outcomes (e.g., different teams in the same league).
+ *
+ * Falls back to heuristic if no API key or on error.
+ */
+async function areMutuallyExclusive(q1, q2) {
+  // Fast heuristic first — if confident, skip LLM
+  const heuristic = heuristicMutuallyExclusive(q1, q2);
+  if (heuristic === true) return true;
+
+  // Check cache
+  const cacheKey = [q1, q2].sort().join("|||");
+  const cached = _mexCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < _MEX_CACHE_TTL) return cached.result;
+
+  // Try AI check
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+  if (!apiKey) {
+    // No API key — rely on heuristic only
+    return heuristic;
+  }
+
+  try {
+    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.0-flash-001",
+        max_tokens: 10,
+        temperature: 0,
+        messages: [{
+          role: "user",
+          content: `Are these two prediction market questions mutually exclusive (only one can resolve YES)?\n\nQ1: "${q1}"\nQ2: "${q2}"\n\nAnswer ONLY "yes" or "no".`,
+        }],
+      }),
+      signal: AbortSignal.timeout(3000),
+    });
+
+    if (resp.ok) {
+      const data = await resp.json();
+      const answer = (data.choices?.[0]?.message?.content || "").trim().toLowerCase();
+      const result = answer.startsWith("yes");
+      _mexCache.set(cacheKey, { result, ts: Date.now() });
+      return result;
+    }
+  } catch {
+    // Timeout or error — fall back to heuristic
+  }
+
+  _mexCache.set(cacheKey, { result: heuristic, ts: Date.now() });
+  return heuristic;
+}
+
+/**
+ * Fast heuristic fallback for mutual exclusivity.
+ * Returns true if clearly mutually exclusive, false otherwise.
+ */
+function heuristicMutuallyExclusive(q1, q2) {
+  // Pattern: "Will [SUBJECT] [verb] the [COMPETITION]?"
+  const winPattern = /^Will\s+(.+?)\s+(win|finish|place|qualify|make)\s+(.+?)(?:\?|$)/i;
+  const m1 = q1.match(winPattern);
+  const m2 = q2.match(winPattern);
+
+  if (m1 && m2) {
+    const verb1 = m1[2].toLowerCase();
+    const verb2 = m2[2].toLowerCase();
+    const frame1 = m1[3].toLowerCase().replace(/[?\s]+$/, "").trim();
+    const frame2 = m2[3].toLowerCase().replace(/[?\s]+$/, "").trim();
+    const subject1 = m1[1].toLowerCase().trim();
+    const subject2 = m2[1].toLowerCase().trim();
+
+    if (verb1 === verb2 && subject1 !== subject2) {
+      // Exact frame match
+      if (frame1 === frame2) return true;
+      // Fuzzy frame match (75%+ word overlap)
+      const words1 = new Set(frame1.split(/\s+/));
+      const words2 = new Set(frame2.split(/\s+/));
+      let overlap = 0;
+      for (const w of words1) if (words2.has(w)) overlap++;
+      const jac = overlap / (words1.size + words2.size - overlap);
+      if (jac > 0.75) return true;
+    }
+  }
+
+  // Pattern: "[SUBJECT] announced as next [ROLE]?"
+  const announcePattern = /^(.+?)\s+announced\s+as\s+(.+?)(?:\?|$)/i;
+  const a1 = q1.match(announcePattern);
+  const a2 = q2.match(announcePattern);
+  if (a1 && a2) {
+    const role1 = a1[2].toLowerCase().replace(/[?\s]+$/, "").trim();
+    const role2 = a2[2].toLowerCase().replace(/[?\s]+$/, "").trim();
+    if (role1 === role2 && a1[1].toLowerCase().trim() !== a2[1].toLowerCase().trim()) return true;
+  }
+
+  return false;
+}
+
 // ── Network violation detection ───────────────────────────────
 
 /**
@@ -259,17 +367,23 @@ export function detectViolations(graph) {
       }
 
       // 3. Correlation violation: highly similar markets with divergent prices
+      //    Candidates are collected here; mutual exclusivity is checked async in detectViolationsAsync()
       if (edge.similarity >= 0.6 && !edge.threshold) {
         const priceDiff = Math.abs(p1 - p2);
         if (priceDiff > 0.15) {
-          violations.push({
-            type: "correlation_divergence",
-            severity: Math.round(priceDiff * 100) / 100,
-            detail: `Highly similar markets (${(edge.similarity * 100).toFixed(0)}% overlap) with ${fmtPct(priceDiff)} price gap. "${truncQ(m1.question)}" (${fmtPct(p1)}) vs "${truncQ(m2.question)}" (${fmtPct(p2)}).`,
-            markets: [m1.conditionId, m2.conditionId],
-            similarity: edge.similarity,
-            prices: [p1, p2],
-          });
+          // Quick heuristic pre-filter — skip if clearly mutually exclusive
+          if (!heuristicMutuallyExclusive(m1.question, m2.question)) {
+            violations.push({
+              type: "correlation_divergence",
+              severity: Math.round(priceDiff * 100) / 100,
+              detail: `Highly similar markets (${(edge.similarity * 100).toFixed(0)}% overlap) with ${fmtPct(priceDiff)} price gap. "${truncQ(m1.question)}" (${fmtPct(p1)}) vs "${truncQ(m2.question)}" (${fmtPct(p2)}).`,
+              markets: [m1.conditionId, m2.conditionId],
+              similarity: edge.similarity,
+              prices: [p1, p2],
+              _q1: m1.question,
+              _q2: m2.question,
+            });
+          }
         }
       }
     }
@@ -278,6 +392,34 @@ export function detectViolations(graph) {
   // Sort by severity
   violations.sort((a, b) => b.severity - a.severity);
   return violations;
+}
+
+/**
+ * Async version of detectViolations — runs AI mutual exclusivity check
+ * on correlation divergence candidates that passed the heuristic filter.
+ * Use this from auto-trade; use sync detectViolations() for fast analysis.
+ */
+export async function detectViolationsAsync(graph) {
+  const violations = detectViolations(graph);
+
+  // AI-check correlation divergence candidates
+  const corrDivs = violations.filter(v => v.type === "correlation_divergence" && v._q1 && v._q2);
+  const others = violations.filter(v => v.type !== "correlation_divergence");
+
+  const checked = await Promise.allSettled(
+    corrDivs.map(async (v) => {
+      const mex = await areMutuallyExclusive(v._q1, v._q2);
+      return mex ? null : v; // null = mutually exclusive, skip it
+    })
+  );
+
+  const validCorrDivs = checked
+    .filter(r => r.status === "fulfilled" && r.value !== null)
+    .map(r => r.value);
+
+  const combined = [...others, ...validCorrDivs];
+  combined.sort((a, b) => b.severity - a.severity);
+  return combined;
 }
 
 /**

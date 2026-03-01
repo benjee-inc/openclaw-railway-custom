@@ -97,18 +97,28 @@ export function extractCity(question) {
  * e.g., "exceed 60F" → { threshold: 60, unit: "F", direction: "above" }
  */
 export function extractTempThreshold(question) {
-  // "exceed 60F", "above 90 degrees", "reach 100°F", "below 32"
-  const patterns = [
+  // Temperature patterns: "exceed 60F", "above 90 degrees", "reach 100°F", "below 32"
+  const tempPatterns = [
     /(?:exceed|above|over|reach|hit|surpass|top)\s+(\d+)\s*°?\s*([FC])?/i,
     /(?:below|under|drop below|fall below)\s+(\d+)\s*°?\s*([FC])?/i,
     /(\d+)\s*°?\s*([FC])?\s+(?:or higher|or more|or above)/i,
     /(\d+)\s*°?\s*([FC])?\s+(?:or lower|or less|or below)/i,
+    // "highest temperature...be 30°C or higher"
+    /(?:highest|lowest|high|low)\s+temperature.*?(\d+)\s*°?\s*([FC])/i,
+    // "temperature in X be ≥60" or "at least 60°F"
+    /(?:at least|minimum|≥|>=)\s*(\d+)\s*°?\s*([FC])?/i,
+    /(?:at most|maximum|≤|<=)\s*(\d+)\s*°?\s*([FC])?/i,
+    // "30°C or more/higher"
+    /(\d+)\s*°\s*([FC])\s*or\s+(?:more|higher|above)/i,
+    /(\d+)\s*°\s*([FC])\s*or\s+(?:less|lower|below)/i,
+    // Bare "record high" style — use context
+    /record\s+(?:high|low)/i,
   ];
 
-  for (const re of patterns) {
+  for (const re of tempPatterns) {
     const m = question.match(re);
-    if (m) {
-      const direction = /below|under|fall|drop|lower|less/i.test(m[0]) ? "below" : "above";
+    if (m && m[1]) {
+      const direction = /below|under|fall|drop|lower|less|lowest|at most|maximum|≤|<=/i.test(m[0]) ? "below" : "above";
       return {
         threshold: Number(m[1]),
         unit: (m[2] || "F").toUpperCase(),
@@ -116,6 +126,40 @@ export function extractTempThreshold(question) {
       };
     }
   }
+
+  // Precipitation patterns: "snow", "rain", "inches"
+  const precipMatch = question.match(/(\d+(?:\.\d+)?)\s*(?:inches?|in\.?|cm|mm)\s+(?:of\s+)?(?:rain|snow|precipitation)/i);
+  if (precipMatch) {
+    return {
+      threshold: Number(precipMatch[1]),
+      unit: "inches",
+      direction: "above",
+      type: "precipitation",
+    };
+  }
+
+  // Wind speed: "winds exceed 75 mph"
+  const windMatch = question.match(/(?:wind|gust).*?(?:exceed|above|over|reach)\s+(\d+)\s*(?:mph|km\/h|knots?)/i);
+  if (windMatch) {
+    return {
+      threshold: Number(windMatch[1]),
+      unit: "mph",
+      direction: "above",
+      type: "wind",
+    };
+  }
+
+  // Hurricane category: "Category 3+ hurricane"
+  const hurriMatch = question.match(/(?:category|cat)\s*([1-5])\+?\s*(?:hurricane|storm|cyclone)/i);
+  if (hurriMatch) {
+    return {
+      threshold: Number(hurriMatch[1]),
+      unit: "category",
+      direction: "above",
+      type: "hurricane",
+    };
+  }
+
   return null;
 }
 
