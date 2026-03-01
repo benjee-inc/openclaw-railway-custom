@@ -211,8 +211,27 @@ function extractTrendsKeyword(question) {
 }
 
 /**
+ * Wrap a promise with a per-source timeout.
+ * If the source doesn't resolve in time, silently drop it (scorer uses fallbacks).
+ */
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => {
+      // Silently resolve — the data slot stays empty, scorer falls back
+      resolve();
+    }, ms)),
+  ]).catch(() => {
+    // Swallow errors — individual source failures are non-fatal
+  });
+}
+
+const SOURCE_TIMEOUT = 8_000; // 8s per source — well under the enrichment deadline
+
+/**
  * Fetch all alt data for a matched market.
  * Returns collected data from all matched sources.
+ * Each source gets an 8s timeout so no single slow API stalls enrichment.
  */
 export async function fetchAltData(market, matchResult) {
   const { sources, params } = matchResult;
@@ -224,24 +243,26 @@ export async function fetchAltData(market, matchResult) {
       case "nws":
         if (params.city) {
           if (params.date) {
-            promises.push(
+            promises.push(withTimeout(
               import("./sources/weather.mjs")
                 .then((w) => w.temperatureOnDate(params.city, params.date))
                 .then((r) => { data.nws = r; }),
-            );
+              SOURCE_TIMEOUT, "nws",
+            ));
           } else {
-            promises.push(
+            promises.push(withTimeout(
               import("./sources/weather.mjs")
                 .then((w) => w.forecast(params.city))
                 .then((r) => { data.nws = r; }),
-            );
+              SOURCE_TIMEOUT, "nws",
+            ));
           }
         }
         break;
 
       case "ensemble":
         if (params.city) {
-          promises.push(
+          promises.push(withTimeout(
             Promise.all([
               import("./sources/weather.mjs"),
               import("./sources/ensemble.mjs"),
@@ -256,62 +277,68 @@ export async function fetchAltData(market, matchResult) {
               return ensembleMod.forecast(grid.lat, grid.lon)
                 .then((r) => { if (r) data.ensemble = r; });
             }),
-          );
+            SOURCE_TIMEOUT, "ensemble",
+          ));
         }
         break;
 
       case "coingecko":
         if (params.coins?.length > 0) {
-          promises.push(
+          promises.push(withTimeout(
             import("./sources/crypto.mjs")
               .then((c) => c.prices(params.coins))
               .then((r) => { data.coingecko = r; }),
-          );
+            SOURCE_TIMEOUT, "coingecko",
+          ));
         }
         break;
 
       case "fear_greed":
-        promises.push(
+        promises.push(withTimeout(
           import("./sources/crypto.mjs")
             .then((c) => c.fearGreed())
             .then((r) => { data.fearGreed = r; }),
-        );
+          SOURCE_TIMEOUT, "fear_greed",
+        ));
         break;
 
       case "coinglass":
         if (params.coins?.length > 0) {
-          promises.push(
+          promises.push(withTimeout(
             import("./sources/coinglass.mjs")
               .then((cg) => cg.fundingRates(params.coins))
               .then((r) => { if (r && Object.keys(r).length > 0) data.funding = r; }),
-          );
+            SOURCE_TIMEOUT, "coinglass",
+          ));
         }
         break;
 
       case "fred":
         if (params.fredSeries?.length > 0) {
-          promises.push(
+          promises.push(withTimeout(
             import("./sources/economics.mjs")
               .then((e) => Promise.all(params.fredSeries.map((s) => e.latestObservation(s))))
               .then((results) => { data.fred = results.filter(Boolean); }),
-          );
+            SOURCE_TIMEOUT, "fred",
+          ));
         }
         break;
 
       case "opensky":
         if (params.zones?.length > 0) {
-          promises.push(
+          promises.push(withTimeout(
             import("./sources/opensky.mjs")
               .then((o) => Promise.all(params.zones.map((z) => o.zoneDensity(z))))
               .then((results) => { data.opensky = results.filter(Boolean); }),
-          );
+            SOURCE_TIMEOUT, "opensky",
+          ));
         }
         break;
 
       case "arxiv":
         if (params.arxivTopics?.length > 0) {
           const topic = params.arxivTopics[0];
-          promises.push(
+          promises.push(withTimeout(
             import("./sources/arxiv.mjs")
               .then((a) => a.velocity(topic.query || topic))
               .then((r) => {
@@ -319,45 +346,50 @@ export async function fetchAltData(market, matchResult) {
                 data.arxiv.specificity = topic.specificity ?? 0.5;
                 data.arxiv.query = topic.query || topic;
               }),
-          );
+            SOURCE_TIMEOUT, "arxiv",
+          ));
         }
         break;
 
       case "metaculus":
         if (params.metaculusQuery) {
-          promises.push(
+          promises.push(withTimeout(
             import("./sources/metaculus.mjs")
               .then((m) => m.searchQuestion(params.metaculusQuery))
               .then((r) => { if (r) data.metaculus = r; }),
-          );
+            SOURCE_TIMEOUT, "metaculus",
+          ));
         }
         break;
 
       case "trends":
         if (params.trendsKeyword) {
-          promises.push(
+          promises.push(withTimeout(
             import("./sources/trends.mjs")
               .then((t) => t.searchInterest(params.trendsKeyword))
               .then((r) => { if (r) data.trends = r; }),
-          );
+            SOURCE_TIMEOUT, "trends",
+          ));
         }
         break;
 
       case "montecarlo":
-        promises.push(
+        promises.push(withTimeout(
           import("./sources/montecarlo.mjs")
             .then((mc) => mc.computeImpliedFromMC(market))
             .then((r) => { if (r) data.montecarlo = r; }),
-        );
+          SOURCE_TIMEOUT, "montecarlo",
+        ));
         break;
 
       case "gdelt":
         if (params.gdeltQuery) {
-          promises.push(
+          promises.push(withTimeout(
             import("./sources/gdelt.mjs")
               .then((g) => g.volumeTrend(params.gdeltQuery))
               .then((r) => { data.gdelt = r; }),
-          );
+            SOURCE_TIMEOUT, "gdelt",
+          ));
         }
         break;
     }

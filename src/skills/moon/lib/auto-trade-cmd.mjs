@@ -215,6 +215,12 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
 
 // ── Palpha enrichment ────────────────────────────────────
 
+// Per-market enrichment timeout. Each market gets its own deadline.
+// With 8s per-source timeouts in fetchAltData, one market should finish in ~10s.
+const ENRICH_PER_MARKET_MS = 12_000;
+// Global safety net — even if per-market timeouts somehow stall.
+const ENRICH_GLOBAL_MS = 30_000;
+
 async function enrichWithPalpha(opportunities, markets, topN = 5) {
   const entries = [];
   const top = opportunities.slice(0, topN);
@@ -225,7 +231,10 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
     if (m.conditionId) mktMap.set(m.conditionId, m);
   }
 
-  const enrichPromises = top.map(async (opp) => {
+  // Enrich a single market with its own timeout.
+  // Returns result even on timeout (marks as unenriched, keeps raw score).
+  async function enrichOne(opp) {
+    const started = Date.now();
     try {
       const market = mktMap.get(opp.conditionId);
       if (!market) return { opp, enriched: false };
@@ -234,7 +243,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       const { category } = categorize(market.question || "");
       const enrichedMarket = { ...market, _category: category };
 
-      // 2. Match + fetch alt data
+      // 2. Match + fetch alt data (per-source 8s timeouts inside)
       const matchResult = match(enrichedMarket);
       const altData = await fetchAltData(enrichedMarket, matchResult);
 
@@ -285,30 +294,50 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       opp._depthSlippage = depthResult?.slippage?.["$100"] ?? null;
       opp.score = adjustedScore;
 
-      entries.push(`[palpha] "${(market.question || "").slice(0, 50)}" cat=${category} rec=${rec} alpha=${(scoreResult.alpha * 100).toFixed(1)}%`);
+      const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+      entries.push(`[palpha] "${(market.question || "").slice(0, 50)}" cat=${category} rec=${rec} alpha=${(scoreResult.alpha * 100).toFixed(1)}% (${elapsed}s)`);
       return { opp, enriched: true, vetoed: false };
     } catch (err) {
       entries.push(`[palpha] Error: "${(opp.question || "").slice(0, 50)}": ${err.message}`);
       return { opp, enriched: false };
     }
-  });
+  }
 
-  const results = await Promise.race([
-    Promise.allSettled(enrichPromises),
-    new Promise((resolve) => setTimeout(() => resolve(null), 15000)),
-  ]);
+  // Run each market enrichment with its own per-market timeout.
+  // Partial results are kept — a timeout on market #3 doesn't discard markets #1 and #2.
+  const enrichPromises = top.map((opp) =>
+    Promise.race([
+      enrichOne(opp),
+      new Promise((resolve) => setTimeout(() => {
+        entries.push(`[palpha] Timeout on "${(opp.question || "").slice(0, 50)}" after ${ENRICH_PER_MARKET_MS / 1000}s — using raw score`);
+        resolve({ opp, enriched: false });
+      }, ENRICH_PER_MARKET_MS)),
+    ]),
+  );
 
-  if (!results) {
-    entries.push("[palpha] Timeout after 15s. Proceeding with raw scores.");
-    return { enriched: opportunities, entries, vetoed: 0 };
+  // Global safety net: collect whatever finished within the deadline.
+  let results;
+  const globalTimeout = new Promise((resolve) => setTimeout(() => resolve(null), ENRICH_GLOBAL_MS));
+  const allSettled = Promise.allSettled(enrichPromises);
+
+  const winner = await Promise.race([allSettled, globalTimeout]);
+  if (winner === null) {
+    // Global timeout hit — but some per-market promises may have already resolved.
+    // allSettled is still pending; we can't await it. Use whatever we logged.
+    entries.push(`[palpha] Global timeout after ${ENRICH_GLOBAL_MS / 1000}s. Using partial results.`);
+    results = [];
+  } else {
+    results = winner;
   }
 
   let vetoedCount = 0;
   const enrichedOpps = [];
+  const processedIds = new Set();
 
   for (const r of results) {
     if (r.status === "rejected") continue;
     const { opp, vetoed: isVetoed, reason } = r.value;
+    processedIds.add(opp.conditionId);
     if (isVetoed) {
       vetoedCount++;
       entries.push(`[palpha] VETOED: "${(opp.question || "").slice(0, 50)}" — ${reason}`);
@@ -317,10 +346,12 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
     enrichedOpps.push(opp);
   }
 
-  // Append remaining non-top opportunities
+  // Append remaining non-top opportunities AND any top opps that timed out (keep raw score)
   const topIds = new Set(top.map((o) => o.conditionId));
   for (const opp of opportunities) {
-    if (!topIds.has(opp.conditionId)) enrichedOpps.push(opp);
+    if (!topIds.has(opp.conditionId) || (topIds.has(opp.conditionId) && !processedIds.has(opp.conditionId))) {
+      enrichedOpps.push(opp);
+    }
   }
 
   enrichedOpps.sort((a, b) => (b._palphaAdjustedScore || b.score) - (a._palphaAdjustedScore || a.score));
