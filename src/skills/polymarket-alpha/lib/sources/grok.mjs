@@ -4,8 +4,6 @@
 import { XAI_API, TTL } from "../constants.mjs";
 import * as cache from "../cache.mjs";
 
-const API_KEY = process.env.X_API_KEY || "";
-
 /**
  * Analyze a prediction market question using Grok's x_search + web_search.
  * Returns a probability estimate with confidence and reasoning.
@@ -16,7 +14,9 @@ const API_KEY = process.env.X_API_KEY || "";
  * @returns {Promise<{probability: number, confidence: string, reasoning: string}|null>}
  */
 export async function analyzeMarket(question, category, marketPrice) {
-  if (!API_KEY) { console.log("[grok] X_API_KEY not set, skipping"); return null; }
+  // Read at call time, not import time — env var may not be set yet at module load
+  const apiKey = process.env.X_API_KEY || "";
+  if (!apiKey) { console.error("[grok] X_API_KEY not set — skipping all Grok analysis"); return null; }
 
   const cacheKey = `grok:${question.slice(0, 80)}`;
   const cached = cache.get(cacheKey);
@@ -28,7 +28,7 @@ export async function analyzeMarket(question, category, marketPrice) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
         model: "grok-4-1-fast-reasoning",
@@ -104,10 +104,11 @@ export async function analyzeMarket(question, category, marketPrice) {
  * Source status check.
  */
 export async function status() {
-  if (!API_KEY) return { name: "grok", ok: false, error: "X_API_KEY not set" };
+  const apiKey = process.env.X_API_KEY || "";
+  if (!apiKey) return { name: "grok", ok: false, error: "X_API_KEY not set" };
   try {
     const res = await fetch(`${XAI_API}/models`, {
-      headers: { Authorization: `Bearer ${API_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(5_000),
     });
     return { name: "grok", ok: res.ok, status: res.status };

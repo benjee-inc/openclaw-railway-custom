@@ -296,9 +296,15 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       const { category } = categorize(market.question || "");
       const enrichedMarket = { ...market, _category: category };
 
-      // 2. Match + fetch alt data (per-source 8s timeouts inside)
+      // 2. Match + fetch alt data (Grok needs 15-25s for x_search + web_search)
       const matchResult = match(enrichedMarket);
       const altData = await fetchAltData(enrichedMarket, matchResult);
+
+      // Log which sources actually returned data
+      const gotSources = Object.keys(altData).filter(k => altData[k] != null);
+      if (gotSources.length === 0) {
+        entries.push(`"${(market.question || "").slice(0, 60)}" — no data sources responded (check X_API_KEY and timeouts)`);
+      }
 
       // 3. Score divergence
       const scoreResult = score(enrichedMarket, altData, matchResult.params);
