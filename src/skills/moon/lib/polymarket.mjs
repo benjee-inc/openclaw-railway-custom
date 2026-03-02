@@ -277,7 +277,7 @@ const NEG_RISK_ABI = [
 const USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com";
 
-export async function redeemPosition(conditionId, negRisk = false) {
+export async function redeemPosition(conditionId, negRisk = false, tokenIds = []) {
   const pk = requireEnv("POLYMARKET_PRIVATE_KEY", "Need POLYMARKET_PRIVATE_KEY to redeem");
   const ethers = await getEthers();
   const provider = ethers.JsonRpcProvider
@@ -286,9 +286,24 @@ export async function redeemPosition(conditionId, negRisk = false) {
   const wallet = new ethers.Wallet(pk, provider);
 
   if (negRisk) {
+    // Query on-chain balances for each outcome token, then pass to redeemPositions
+    const ERC1155_ABI = ["function balanceOf(address account, uint256 id) view returns (uint256)"];
+    const ctf = new ethers.Contract(CTF_ADDRESS, ERC1155_ABI, provider);
+    const amounts = [];
+    for (const tid of tokenIds) {
+      try {
+        const bal = await ctf.balanceOf(wallet.address, tid);
+        amounts.push(bal);
+      } catch {
+        amounts.push(0);
+      }
+    }
+    // Skip if no tokens to redeem
+    if (amounts.every(a => a.toString() === "0")) {
+      return { success: true, txHash: "no-tokens-to-redeem", gasUsed: "0" };
+    }
     const adapter = new ethers.Contract(NEG_RISK_ADAPTER, NEG_RISK_ABI, wallet);
-    // For neg risk markets, pass empty amounts array — contract calculates
-    const tx = await adapter.redeemPositions(conditionId, []);
+    const tx = await adapter.redeemPositions(conditionId, amounts);
     const receipt = await tx.wait();
     return { success: true, txHash: receipt.hash, gasUsed: receipt.gasUsed?.toString() };
   } else {

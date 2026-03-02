@@ -698,7 +698,7 @@ async function autoTakeProfit() {
           if (isWinner && size > 0) {
             console.log(`[auto-redeem] Redeeming ${size.toFixed(1)} winning ${outcome.toUpperCase()} shares of "${title}"`);
             try {
-              const result = await redeemPosition(cid, market.negRisk);
+              const result = await redeemPosition(cid, market.negRisk, market.clobTokenIds || []);
               entries.push({
                 timestamp: new Date().toISOString(),
                 type: "trade",
