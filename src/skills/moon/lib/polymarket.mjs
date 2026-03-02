@@ -280,7 +280,9 @@ const POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com";
 export async function redeemPosition(conditionId, negRisk = false) {
   const pk = requireEnv("POLYMARKET_PRIVATE_KEY", "Need POLYMARKET_PRIVATE_KEY to redeem");
   const ethers = await getEthers();
-  const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+  const provider = ethers.JsonRpcProvider
+    ? new ethers.JsonRpcProvider(POLYGON_RPC)
+    : new ethers.providers.JsonRpcProvider(POLYGON_RPC);
   const wallet = new ethers.Wallet(pk, provider);
 
   if (negRisk) {
