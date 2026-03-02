@@ -26,7 +26,7 @@ export async function analyzeMarket(question, category, marketPrice) {
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "grok-3-fast",
+        model: "grok-4-1-fast-reasoning",
         input: [
           {
             role: "system",
