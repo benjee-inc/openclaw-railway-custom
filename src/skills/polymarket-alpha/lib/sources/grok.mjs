@@ -116,6 +116,8 @@ export async function analyzeMarket(question, category, marketPrice, signalConte
 
       cache.set(cacheKey, result, TTL.grok);
       console.log(`[grok] OK: "${question.slice(0, 40)}" → ${(result.probability * 100).toFixed(0)}% (${result.confidence})`);
+      if (result.reasoning) console.log(`[grok] reasoning: ${result.reasoning}`);
+      if (result.keySignals?.length > 0) console.log(`[grok] signals: ${result.keySignals.join(" | ")}`);
       return result;
     } catch (e) {
       const isTimeout = e.name === "TimeoutError" || e.name === "AbortError" || e.message?.includes("abort");
