@@ -1,22 +1,17 @@
 // polymarket-alpha — Grok (xAI) real-time X/Twitter + web search analysis
+// Uses the Responses API (/v1/responses) with web_search + x_search tools
 // Requires XAI_API_KEY env var; silently skips if not set
 
 import { XAI_API, TTL } from "../constants.mjs";
 import * as cache from "../cache.mjs";
 
 /**
- * Analyze a prediction market question using Grok's x_search + web_search.
+ * Analyze a prediction market question using Grok's web_search + x_search.
  * Returns a probability estimate with confidence and reasoning.
- *
- * @param {string} question - the market question
- * @param {string} category - market category (weather, crypto, etc.)
- * @param {number} marketPrice - current YES price (0-1)
- * @returns {Promise<{probability: number, confidence: string, reasoning: string}|null>}
  */
 export async function analyzeMarket(question, category, marketPrice) {
-  // Read at call time, not import time — env var may not be set yet at module load
   const apiKey = process.env.XAI_API_KEY || "";
-  if (!apiKey) { console.error("[grok] XAI_API_KEY not set — skipping all Grok analysis"); return null; }
+  if (!apiKey) { console.error("[grok] XAI_API_KEY not set — skipping"); return null; }
 
   const cacheKey = `grok:${question.slice(0, 80)}`;
   const cached = cache.get(cacheKey);
@@ -24,59 +19,75 @@ export async function analyzeMarket(question, category, marketPrice) {
 
   try {
     console.log(`[grok] calling xAI for: "${question.slice(0, 60)}"`);
-    const res = await fetch(`${XAI_API}/chat/completions`, {
+    const res = await fetch(`${XAI_API}/responses`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "grok-4-1-fast-reasoning",
-        messages: [
+        model: "grok-3-fast",
+        input: [
           {
             role: "system",
             content:
-              "You are Grok, an elite high-signal forecaster specialized in prediction markets and real-time event probability assessment.\n\n" +
-              "Task: Determine the most accurate probability (0.00–1.00) that the market question resolves YES.\n\n" +
-              "Think through:\n" +
-              "1. What do you know about this topic? Key facts, recent developments, historical patterns.\n" +
-              "2. Evidence for YES and evidence for NO.\n" +
-              "3. Resolution criteria, base rates, and edge cases.\n" +
-              "4. Upcoming catalysts and risks.\n" +
-              "5. Is the market over- or under-pricing this?\n\n" +
-              "Output ONLY a single valid JSON object. No other text, no markdown, no explanations.\n\n" +
-              '{"probability": 0.XX, "confidence": "high"|"medium"|"low", "reasoning": "3–6 sentence high-signal synthesis of the strongest evidence, your logic, and why you chose this number", ' +
-              '"key_signals": ["bullet 1", "bullet 2", "bullet 3", "bullet 4"], ' +
-              '"market_comparison": "One sentence on how/why your probability differs from the current market price", ' +
-              '"major_catalysts": ["near-term catalyst 1", "catalyst 2"], ' +
-              '"major_risks": ["biggest risk 1", "risk 2"]}',
+              "You are an elite prediction market forecaster with real-time search.\n\n" +
+              "Task: Determine the probability (0.00–1.00) that the question resolves YES. " +
+              "Search X and the web for the latest info before answering.\n\n" +
+              "Output ONLY a single valid JSON object. No other text.\n\n" +
+              '{"probability": 0.XX, "confidence": "high"|"medium"|"low", "reasoning": "3–6 sentences with your analysis", ' +
+              '"key_signals": ["signal 1", "signal 2", "signal 3"], ' +
+              '"market_comparison": "How your view differs from the market price"}',
           },
           {
             role: "user",
             content: `Category: ${category}. Current market price: ${(marketPrice * 100).toFixed(1)}% YES. Question: "${question}"`,
           },
         ],
+        tools: [
+          { type: "web_search" },
+          { type: "x_search" },
+        ],
         temperature: 0,
       }),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(45_000),
     });
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      console.log(`[grok] API error ${res.status}: ${body.slice(0, 200)}`);
+      console.error(`[grok] API error ${res.status}: ${body.slice(0, 300)}`);
       return null;
     }
 
     const data = await res.json();
-    const content = data.choices?.[0]?.message?.content;
+
+    // Responses API: output is an array of items; find the text output
+    let content = null;
+    if (data.output) {
+      for (const item of data.output) {
+        if (item.type === "message" && item.content) {
+          for (const block of item.content) {
+            if (block.type === "output_text" || block.type === "text") {
+              content = block.text;
+              break;
+            }
+          }
+        }
+      }
+    }
+    // Fallback: try chat completions format
     if (!content) {
-      console.log(`[grok] no content in response:`, JSON.stringify(data).slice(0, 300));
+      content = data.choices?.[0]?.message?.content;
+    }
+
+    if (!content) {
+      console.log(`[grok] no content in response:`, JSON.stringify(data).slice(0, 400));
       return null;
     }
 
     // Extract JSON from response (may be wrapped in markdown code block)
     const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
+    if (!jsonMatch) { console.log(`[grok] no JSON in response: ${content.slice(0, 200)}`); return null; }
 
     const parsed = JSON.parse(jsonMatch[0]);
     if (parsed.probability == null || isNaN(parsed.probability)) return null;
@@ -92,9 +103,10 @@ export async function analyzeMarket(question, category, marketPrice) {
     };
 
     cache.set(cacheKey, result, TTL.grok);
+    console.log(`[grok] OK: "${question.slice(0, 40)}" → ${(result.probability * 100).toFixed(0)}% (${result.confidence})`);
     return result;
   } catch (e) {
-    console.log(`[grok] error: ${e.message}`);
+    console.error(`[grok] error: ${e.message}`);
     return null;
   }
 }
