@@ -279,10 +279,35 @@ const ENRICH_PER_MARKET_MS = 180_000; // 3 minutes
 // Global safety net — markets run in parallel so this just caps total wall time.
 const ENRICH_GLOBAL_MS = 240_000; // 4 minutes
 
+// Veto cooldown — markets vetoed by palpha don't get re-enriched for 30 min.
+// Prevents the same markets from burning Grok tokens every cycle.
+const VETO_COOLDOWN_MS = 30 * 60_000;
+const _vetoed = new Map(); // conditionId → { ts, reason }
+
+function isVetoed(conditionId) {
+  const v = _vetoed.get(conditionId);
+  if (!v) return false;
+  if (Date.now() - v.ts > VETO_COOLDOWN_MS) { _vetoed.delete(conditionId); return false; }
+  return true;
+}
+function recordVeto(conditionId, reason) {
+  _vetoed.set(conditionId, { ts: Date.now(), reason });
+}
+
 async function enrichWithPalpha(opportunities, markets, topN = 5) {
   const entries = [];
-  const top = opportunities.slice(0, topN);
-  if (top.length === 0) return { enriched: opportunities, entries, vetoed: 0 };
+
+  // Filter out recently vetoed markets before wasting Grok tokens
+  const preFiltered = opportunities.filter(opp => {
+    if (isVetoed(opp.conditionId)) {
+      entries.push(`[veto-cache] "${(opp.question || "").slice(0, 50)}" — skipped (vetoed ${((Date.now() - _vetoed.get(opp.conditionId).ts) / 60000).toFixed(0)}min ago)`);
+      return false;
+    }
+    return true;
+  });
+
+  const top = preFiltered.slice(0, topN);
+  if (top.length === 0) return { enriched: opportunities.filter(o => !isVetoed(o.conditionId)), entries, vetoed: opportunities.length - preFiltered.length };
 
   const mktMap = new Map();
   for (const m of markets) {
@@ -474,6 +499,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
     processedIds.add(opp.conditionId);
     if (isVetoed) {
       vetoedCount++;
+      recordVeto(opp.conditionId, reason);
       entries.push(`[palpha] VETOED: "${(opp.question || "").slice(0, 60)}" — ${reason}`);
       continue;
     }
