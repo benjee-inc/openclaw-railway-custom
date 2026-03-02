@@ -56,7 +56,7 @@ export async function analyzeMarket(question, category, marketPrice) {
             content: `Category: ${category}. Current market price: ${(marketPrice * 100).toFixed(1)}% YES. Question: "${question}"`,
           },
         ],
-        tools: [{ type: "x_search" }, { type: "web_search" }],
+        tools: [{ type: "live_search" }],
         temperature: 0,
       }),
       signal: AbortSignal.timeout(50_000),
