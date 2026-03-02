@@ -884,10 +884,17 @@ async function runScanCycle() {
 
   let newEntries = [];
   let autoTradeEntries = [];
+  let trades = [];
+  let markets = [];
+  let liveMids = {};
+  let tradeFlows = [];
+  let signals = {};
+  let midShifts = [];
+  let tradeOutput = null;
 
   try {
     // Fetch all data sources in parallel
-    const [trades, markets] = await Promise.all([
+    [trades, markets] = await Promise.all([
       fetchRecentTrades().catch((e) => { console.error(`[scanner] trades error: ${e.message}`); return []; }),
       fetchGammaMarkets().catch((e) => { throw e; }), // gamma is critical
     ]);
@@ -898,12 +905,12 @@ async function runScanCycle() {
       .sort((a, b) => b.volume24h - a.volume24h)
       .slice(0, 50)
       .map((m) => m.tokenId);
-    const liveMids = await fetchLiveMidpoints(topTokens).catch(() => ({}));
+    liveMids = await fetchLiveMidpoints(topTokens).catch(() => ({}));
 
     // Analyze
-    const tradeFlows = analyzeTradeFlow(trades);
-    const signals = detectAlpha(markets);
-    const midShifts = detectMidpointShifts(markets, liveMids);
+    tradeFlows = analyzeTradeFlow(trades);
+    signals = detectAlpha(markets);
+    midShifts = detectMidpointShifts(markets, liveMids);
 
     newEntries = buildEntries(markets, signals, tradeFlows, midShifts);
 
@@ -915,7 +922,6 @@ async function runScanCycle() {
       const { cmdAutoTrade } = await import("./lib/auto-trade-cmd.mjs");
       // Suppress stdout output — capture via monkey-patch
       const origLog = console.log;
-      let tradeOutput = null;
       console.log = (...a) => {
         // Capture the JSON output from out()
         if (a.length === 1 && typeof a[0] === "string" && a[0].startsWith("{")) {
@@ -925,9 +931,9 @@ async function runScanCycle() {
       await cmdAutoTrade([], { skipDashboardPush: true });
       console.log = origLog;
       if (tradeOutput) {
-        const trades = tradeOutput.tradesExecuted?.length || 0;
+        const tradeCount = tradeOutput.tradesExecuted?.length || 0;
         const vetoed = tradeOutput.vetoed || 0;
-        console.log(`[scanner] auto-trade: ${trades} executed, ${vetoed} vetoed, daily=$${(tradeOutput.dailySpend || 0).toFixed(2)}`);
+        console.log(`[scanner] auto-trade: ${tradeCount} executed, ${vetoed} vetoed, daily=$${(tradeOutput.dailySpend || 0).toFixed(2)}`);
         if (tradeOutput.dashEntries) autoTradeEntries = tradeOutput.dashEntries;
       }
     } catch (err) {
@@ -936,6 +942,87 @@ async function runScanCycle() {
   } catch (err) {
     console.error(`[scanner] cycle error: ${err.message}`);
     newEntries = [entry("scan", `Error: ${err.message}`)];
+  }
+
+  // Build pipeline stats entry for DATA tab
+  let pipelineEntry = null;
+  try {
+    // Collect top signals across all types
+    const topSignals = [];
+    if (typeof signals === "object" && signals) {
+      const sigTypes = ["movers1h", "movers1d", "volumeSpikes", "catalysts", "deepValue", "tightRaces", "wideSpread"];
+      for (const st of sigTypes) {
+        for (const s of (signals[st] || []).slice(0, 2)) {
+          topSignals.push({
+            q: (s.q || "").slice(0, 80),
+            type: st,
+            score: s.score || 0,
+            change: s.change1h != null ? `${s.change1h > 0 ? "+" : ""}${(s.change1h * 100).toFixed(1)}%`
+              : s.change1d != null ? `${s.change1d > 0 ? "+" : ""}${(s.change1d * 100).toFixed(1)}%`
+              : null,
+          });
+        }
+      }
+      topSignals.sort((a, b) => b.score - a.score);
+    }
+
+    const tradeVol = Array.isArray(tradeFlows)
+      ? tradeFlows.reduce((s, f) => s + (f.total || 0), 0)
+      : 0;
+    const avgImbalance = Array.isArray(tradeFlows) && tradeFlows.length > 0
+      ? tradeFlows.reduce((s, f) => s + (f.imbalance || 0), 0) / tradeFlows.length
+      : 0;
+    const avgMidMag = Array.isArray(midShifts) && midShifts.length > 0
+      ? midShifts.reduce((s, ms) => s + Math.abs(ms.diff || 0), 0) / midShifts.length
+      : 0;
+
+    pipelineEntry = {
+      type: "pipeline",
+      timestamp: iso(),
+      cycle: cycleCount,
+      ingestion: {
+        markets: Array.isArray(markets) ? markets.length : 0,
+        trades: Array.isArray(trades) ? trades.length : 0,
+        tradeVolume: Math.round(tradeVol),
+        midpointsFetched: Object.keys(liveMids || {}).length,
+      },
+      signals: {
+        movers1h: signals?.movers1h?.length || 0,
+        movers1d: signals?.movers1d?.length || 0,
+        volumeSpikes: signals?.volumeSpikes?.length || 0,
+        catalysts: signals?.catalysts?.length || 0,
+        deepValue: signals?.deepValue?.length || 0,
+        tightRaces: signals?.tightRaces?.length || 0,
+        wideSpread: signals?.wideSpread?.length || 0,
+      },
+      tradeFlows: {
+        count: Array.isArray(tradeFlows) ? tradeFlows.length : 0,
+        totalVolume: Math.round(tradeVol),
+        avgImbalance: parseFloat(avgImbalance.toFixed(3)),
+      },
+      midShifts: {
+        count: Array.isArray(midShifts) ? midShifts.length : 0,
+        avgMagnitude: parseFloat(avgMidMag.toFixed(4)),
+      },
+      enrichment: {
+        rawOpportunities: tradeOutput?.opportunities || 0,
+        enriched: tradeOutput?.enriched || 0,
+        vetoed: tradeOutput?.vetoed || 0,
+        vetoReasons: tradeOutput?.vetoReasons || {},
+        grokCalls: tradeOutput?.enriched || 0, // approximate: 1 Grok call per enriched opp
+        recommendations: tradeOutput?.recommendations || {},
+      },
+      execution: {
+        tradesExecuted: tradeOutput?.tradesExecuted?.length || 0,
+        skipped: tradeOutput?.skipped?.length || 0,
+        skipReasons: tradeOutput?.skipReasons || {},
+        dailySpend: tradeOutput?.dailySpend || 0,
+        openPositions: tradeOutput?.openPositions || 0,
+      },
+      topSignals: topSignals.slice(0, 5),
+    };
+  } catch (err) {
+    console.error(`[scanner] pipeline entry error: ${err.message}`);
   }
 
   // Auto-sell positions that hit profit target
@@ -966,7 +1053,8 @@ async function runScanCycle() {
   try {
     const { sha, entries: existing } = await getExistingJsonl(token, repo);
     const parsedNew = newEntries.map((e) => typeof e === "string" ? JSON.parse(e) : e);
-    const combined = [...existing, ...autoTradeEntries, ...profitEntries, ...pnlEntries, ...parsedNew];
+    const pipelineEntries = pipelineEntry ? [pipelineEntry] : [];
+    const combined = [...existing, ...autoTradeEntries, ...profitEntries, ...pnlEntries, ...pipelineEntries, ...parsedNew];
     const trimmed = combined.slice(-MAX_ENTRIES);
     await pushJsonl(token, repo, sha, trimmed);
     console.log(`[scanner] pushed ${newEntries.length} scan + ${autoTradeEntries.length} trade entries (total: ${trimmed.length})`);

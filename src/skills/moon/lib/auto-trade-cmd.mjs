@@ -490,6 +490,8 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
   }
 
   let vetoedCount = 0;
+  const vetoReasons = {};       // reason → count
+  const recommendations = {};   // rec tier → count
   const enrichedOpps = [];
   const processedIds = new Set();
 
@@ -499,10 +501,15 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
     processedIds.add(opp.conditionId);
     if (isVetoed) {
       vetoedCount++;
+      const bucket = (reason || "unknown").replace(/:.*/s, "").trim(); // group by prefix
+      vetoReasons[bucket] = (vetoReasons[bucket] || 0) + 1;
       recordVeto(opp.conditionId, reason);
       entries.push(`[palpha] VETOED: "${(opp.question || "").slice(0, 60)}" — ${reason}`);
       continue;
     }
+    // Track recommendation tier
+    const rec = opp._palphaRec || "UNSCORED";
+    recommendations[rec] = (recommendations[rec] || 0) + 1;
     enrichedOpps.push(opp);
   }
 
@@ -516,7 +523,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
   }
 
   enrichedOpps.sort((a, b) => (b._palphaAdjustedScore || b.score) - (a._palphaAdjustedScore || a.score));
-  return { enriched: enrichedOpps, entries, vetoed: vetoedCount };
+  return { enriched: enrichedOpps, entries, vetoed: vetoedCount, vetoReasons, recommendations };
 }
 
 // ── Network violation detection ──────────────────────────
@@ -741,10 +748,14 @@ export async function cmdAutoTrade(args, opts = {}) {
   // 7. Palpha enrichment + hard gate
   let opportunities = rawOpportunities;
   let palphaVetoed = 0;
+  let palphaVetoReasons = {};
+  let palphaRecommendations = {};
   try {
     const result = await enrichWithPalpha(rawOpportunities, markets, 5);
     opportunities = result.enriched;
     palphaVetoed = result.vetoed;
+    palphaVetoReasons = result.vetoReasons || {};
+    palphaRecommendations = result.recommendations || {};
     log.push(...result.entries);
   } catch (err) {
     log.push(`[palpha] Error: ${err.message}. Using raw scores.`);
@@ -953,7 +964,14 @@ export async function cmdAutoTrade(args, opts = {}) {
   }
   if (!skipDashboardPush) await pushToDashboard(dashEntries);
 
-  // 12. Output
+  // 12. Build skip reasons summary
+  const skipReasons = {};
+  for (const s of skipped) {
+    const bucket = (s.reason || "unknown").replace(/:.*/s, "").replace(/spread too wide.*/, "spread too wide").replace(/same-event dedup.*/, "same-event dedup");
+    skipReasons[bucket] = (skipReasons[bucket] || 0) + 1;
+  }
+
+  // 13. Output
   const finalState = getAutoTraderState();
   out({
     cycle: signalData.cycle,
@@ -963,6 +981,10 @@ export async function cmdAutoTrade(args, opts = {}) {
     opportunities: rawOpportunities.length,
     enriched: opportunities.length,
     vetoed: palphaVetoed,
+    vetoReasons: palphaVetoReasons,
+    recommendations: palphaRecommendations,
+    skipReasons,
+    openPositions: currentOpenPositions,
     dailySpend: finalState.dailySpend,
     dailyTrades: finalState.dailyTrades,
     dailyLimit: maxDay,
