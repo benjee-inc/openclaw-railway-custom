@@ -303,17 +303,29 @@ export async function redeemPosition(conditionId, negRisk = false, tokenIds = []
       return { success: true, txHash: "no-tokens-to-redeem", gasUsed: "0" };
     }
     const adapter = new ethers.Contract(NEG_RISK_ADAPTER, NEG_RISK_ABI, wallet);
-    const tx = await adapter.redeemPositions(conditionId, amounts);
+    // Polygon requires ~30 gwei min tip; fetch current fee data to be safe
+    const feeData = await provider.getFeeData();
+    const gasOpts = {
+      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || ethers.parseUnits?.("35", "gwei") || ethers.utils.parseUnits("35", "gwei"),
+      maxFeePerGas: feeData.maxFeePerGas || ethers.parseUnits?.("200", "gwei") || ethers.utils.parseUnits("200", "gwei"),
+    };
+    const tx = await adapter.redeemPositions(conditionId, amounts, gasOpts);
     const receipt = await tx.wait();
     return { success: true, txHash: receipt.hash, gasUsed: receipt.gasUsed?.toString() };
   } else {
     const ctf = new ethers.Contract(CTF_ADDRESS, CTF_ABI, wallet);
+    const feeData = await provider.getFeeData();
+    const gasOpts = {
+      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || ethers.parseUnits?.("35", "gwei") || ethers.utils.parseUnits("35", "gwei"),
+      maxFeePerGas: feeData.maxFeePerGas || ethers.parseUnits?.("200", "gwei") || ethers.utils.parseUnits("200", "gwei"),
+    };
     // indexSets: [1, 2] = YES (0b01) and NO (0b10) outcomes
     const tx = await ctf.redeemPositions(
       USDC_POLYGON,
       "0x0000000000000000000000000000000000000000000000000000000000000000",
       conditionId,
       [1, 2],
+      gasOpts,
     );
     const receipt = await tx.wait();
     return { success: true, txHash: receipt.hash, gasUsed: receipt.gasUsed?.toString() };
