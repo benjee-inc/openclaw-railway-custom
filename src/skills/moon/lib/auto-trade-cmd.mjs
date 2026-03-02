@@ -346,7 +346,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
         if (altData?.grok?.probability != null) {
           const g = altData.grok;
           const grokPct = (g.probability * 100).toFixed(0);
-          entries.push(`Grok says "${q}" is ${grokPct}% likely (market says ${mktPct}%) — ${(g.reasoning || "").slice(0, 250)}`);
+          entries.push(`I think "${q}" is ${grokPct}% likely (market says ${mktPct}%) — ${(g.reasoning || "").slice(0, 250)}`);
         } else if (srcs.length === 0) {
           entries.push(`Looked at "${q}" but couldn't get data (Grok may have timed out)`);
         } else {
@@ -376,7 +376,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       if (altData?.grok?.probability != null) {
         const g = altData.grok;
         const grokPct = (g.probability * 100).toFixed(0);
-        entries.push(`Grok on "${q}": ${grokPct}% (${g.confidence}) vs market ${mktPct}% — ${(g.reasoning || "").slice(0, 250)}`);
+        entries.push(`I think "${q}" is ${grokPct}% likely (market says ${mktPct}%) — ${(g.reasoning || "").slice(0, 250)}`);
       }
 
       entries.push(`${rec} "${q}" — market ${mktPct}%, data says ${implied}, betting ${opp.outcome.toUpperCase()}${aligned ? "" : " (AGAINST data direction)"} (${elapsed}s)`);
