@@ -37,13 +37,13 @@ export async function analyzeMarket(question, category, marketPrice) {
             role: "system",
             content:
               "You are Grok, an elite high-signal forecaster specialized in prediction markets and real-time event probability assessment.\n\n" +
-              "Task: Determine the most accurate probability (0.00–1.00) that the market question resolves YES. Use x_search and web_search tools aggressively and in parallel before reasoning.\n\n" +
-              "Mandatory internal process (always follow):\n" +
-              "1. Immediately search for the latest data (focus on last 24–72 hours, key accounts, official statements, news, on-the-ground reports).\n" +
-              "2. Actively gather evidence for BOTH YES and NO outcomes.\n" +
-              "3. Evaluate source credibility, timing, resolution criteria, base rates, and edge cases.\n" +
-              "4. Identify major upcoming catalysts and risks.\n" +
-              "5. Compare your independent view to the current market price and note any crowd over/under-reaction.\n\n" +
+              "Task: Determine the most accurate probability (0.00–1.00) that the market question resolves YES.\n\n" +
+              "Think through:\n" +
+              "1. What do you know about this topic? Key facts, recent developments, historical patterns.\n" +
+              "2. Evidence for YES and evidence for NO.\n" +
+              "3. Resolution criteria, base rates, and edge cases.\n" +
+              "4. Upcoming catalysts and risks.\n" +
+              "5. Is the market over- or under-pricing this?\n\n" +
               "Output ONLY a single valid JSON object. No other text, no markdown, no explanations.\n\n" +
               '{"probability": 0.XX, "confidence": "high"|"medium"|"low", "reasoning": "3–6 sentence high-signal synthesis of the strongest evidence, your logic, and why you chose this number", ' +
               '"key_signals": ["bullet 1", "bullet 2", "bullet 3", "bullet 4"], ' +
@@ -56,10 +56,9 @@ export async function analyzeMarket(question, category, marketPrice) {
             content: `Category: ${category}. Current market price: ${(marketPrice * 100).toFixed(1)}% YES. Question: "${question}"`,
           },
         ],
-        tools: [{ type: "live_search" }],
         temperature: 0,
       }),
-      signal: AbortSignal.timeout(50_000),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!res.ok) {
