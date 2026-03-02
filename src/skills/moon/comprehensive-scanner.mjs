@@ -726,7 +726,7 @@ async function autoTakeProfit() {
 
       // Never sell too cheap — if price is below MIN_EXIT_PRICE, the spread
       // will eat most of the proceeds. Better to hold and let it resolve.
-      if (curPrice < MIN_EXIT_PRICE) continue; // silently skip sub-penny positions
+      if (curPrice < MIN_EXIT_PRICE) continue;
 
       const sellReason = isTakeProfit ? "TAKE PROFIT" : "STOP LOSS";
 
@@ -743,7 +743,7 @@ async function autoTakeProfit() {
           entries.push({
             timestamp: new Date().toISOString(),
             type: "palpha",
-            message: `[auto-sell] SKIP: "${title}" spread too wide for exit (${(mktSpread * 100).toFixed(1)}¢ on ${(curPrice * 100).toFixed(1)}¢ = ${((mktSpread / curPrice) * 100).toFixed(0)}%) — waiting for tighter spread`,
+            message: `Holding "${title}" — spread too wide to sell right now`,
           });
           continue;
         }
@@ -756,7 +756,7 @@ async function autoTakeProfit() {
           entries.push({
             timestamp: new Date().toISOString(),
             type: "trade",
-            message: `[auto-sell] ${sellReason}: Sold ${outcome.toUpperCase()} ${size.toFixed(1)} shares of "${title}" @ ${(curPrice * 100).toFixed(1)}¢ (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(0)}%) → $${proceeds.toFixed(2)} | order=${result.orderId}`,
+            message: `${sellReason}: Sold "${title}" — ${size.toFixed(0)} shares @ ${(curPrice * 100).toFixed(1)}¢ (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(0)}%) for $${proceeds.toFixed(2)}`,
           });
         }
       } catch (err) {

@@ -29,8 +29,8 @@ const MIN_LIQUIDITY = 50_000;   // $50K minimum liquidity
 const MIN_LIQUIDITY_WEATHER = 10_000; // $10K for weather markets
 const MAX_TRADES_PER_INVOCATION = 3;
 const MAX_OPEN_POSITIONS = 10;  // Never hold more than 10 positions at once
-const MIN_TRADE = 5;            // $5 minimum
-const MAX_SPREAD_RATIO = 0.05;  // Skip trades where spread > 5% of entry price
+const MIN_TRADE = 50;           // $50 minimum
+const MAX_SPREAD_RATIO = 0.15;  // Skip trades where spread > 15% of entry price
 const DUST_VALUE_THRESHOLD = 0.50; // Positions worth < $0.50 are dust — don't count toward cap
 const DATA_API = "https://data-api.polymarket.com";
 const DEFAULT_STALE_MS = 600_000; // 10 minutes
@@ -269,10 +269,10 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
 // ── Palpha enrichment ────────────────────────────────────
 
 // Per-market enrichment timeout. Each market gets its own deadline.
-// With 8s per-source timeouts in fetchAltData, one market should finish in ~10s.
-const ENRICH_PER_MARKET_MS = 12_000;
-// Global safety net — even if per-market timeouts somehow stall.
-const ENRICH_GLOBAL_MS = 30_000;
+// Grok x_search + web_search can take 15-25s, so give each market 30s.
+const ENRICH_PER_MARKET_MS = 30_000;
+// Global safety net — 5 markets × 30s = 150s max, but they run in parallel.
+const ENRICH_GLOBAL_MS = 60_000;
 
 async function enrichWithPalpha(opportunities, markets, topN = 5) {
   const entries = [];
@@ -331,24 +331,29 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
 
       // 7. Depth veto — hard gate
       if (depthResult && !depthResult.executable) {
-        return { opp, enriched: true, vetoed: true, reason: `depth not executable: ${depthResult.reason}` };
+        const q = (market.question || "").slice(0, 60);
+        entries.push(`Skipping "${q}" — orderbook too thin to fill safely`);
+        return { opp, enriched: true, vetoed: true, reason: `thin orderbook` };
       }
 
       // 8. Hard gate: only ACTIONABLE/NOTABLE pass through
       if (rec !== "ACTIONABLE" && rec !== "NOTABLE") {
+        const q = (market.question || "").slice(0, 60);
         const mktPct = ((market.prices?.[0] || 0) * 100).toFixed(1);
-        const implied = scoreResult.altDataImplied != null ? (scoreResult.altDataImplied * 100).toFixed(1) + "%" : "n/a";
-        const srcList = (scoreResult.sources || []).join(",");
+        const srcs = scoreResult.sources || [];
 
-        // Log what Grok thought (even on veto) so we can see its reasoning
+        // Log what we found out about this market
         if (altData?.grok?.probability != null) {
           const g = altData.grok;
           const grokPct = (g.probability * 100).toFixed(0);
-          const signals = g.keySignals?.length > 0 ? g.keySignals.slice(0, 3).join("; ") : "";
-          entries.push(`[grok] "${(market.question || "").slice(0, 60)}" → ${grokPct}% (${g.confidence || "?"}) | mkt=${mktPct}% | ${g.reasoning || ""}${signals ? " | " + signals : ""}`);
+          entries.push(`Grok says "${q}" is ${grokPct}% likely (market says ${mktPct}%) — ${(g.reasoning || "").slice(0, 250)}`);
+        } else if (srcs.length === 0) {
+          entries.push(`Looked at "${q}" but couldn't get data (Grok may have timed out)`);
+        } else {
+          entries.push(`Looked at "${q}" (market @ ${mktPct}%) but didn't find enough edge to trade`);
         }
 
-        return { opp, enriched: true, vetoed: true, reason: `${rec} — mkt=${mktPct}% implied=${implied} src=[${srcList}]` };
+        return { opp, enriched: true, vetoed: true, reason: `not enough edge` };
       }
 
       opp._palphaRec = rec;
@@ -362,19 +367,21 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       opp.score = adjustedScore;
 
       const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-      const srcList = (scoreResult.sources || []).join(",");
-      const dir = scoreResult.direction || "?";
-      const conf = ((scoreResult.confidence || 0) * 100).toFixed(0);
-      const implied = scoreResult.altDataImplied != null ? (scoreResult.altDataImplied * 100).toFixed(1) + "%" : "n/a";
       const mktPct = ((market.prices?.[0] || 0) * 100).toFixed(1);
-      const depthInfo = depthResult
-        ? `depth=${depthResult.executable ? "OK" : "FAIL"} slippage=$${(depthResult.slippage?.["$100"] ?? 0).toFixed(2)}`
-        : "depth=n/a";
-      const aligned = (scannerBuyingYes && palphaFavorsYes) || (!scannerBuyingYes && !palphaFavorsYes) ? "ALIGNED" : "CONFLICT";
+      const implied = scoreResult.altDataImplied != null ? (scoreResult.altDataImplied * 100).toFixed(1) + "%" : "n/a";
+      const aligned = (scannerBuyingYes && palphaFavorsYes) || (!scannerBuyingYes && !palphaFavorsYes);
+      const q = (market.question || "").slice(0, 60);
 
-      entries.push(`[palpha] "${(market.question || "").slice(0, 60)}" | cat=${category} rec=${rec} alpha=${(scoreResult.alpha * 100).toFixed(1)}% conf=${conf}% | mkt=${mktPct}% implied=${implied} dir=${dir} | sources=[${srcList}] | ${depthInfo} | scanner=${opp.outcome.toUpperCase()} vs palpha=${palphaFavorsYes ? "YES" : "NO"} → ${aligned} | (${elapsed}s)`);
+      // Grok reasoning (the main thing we want to see)
+      if (altData?.grok?.probability != null) {
+        const g = altData.grok;
+        const grokPct = (g.probability * 100).toFixed(0);
+        entries.push(`Grok on "${q}": ${grokPct}% (${g.confidence}) vs market ${mktPct}% — ${(g.reasoning || "").slice(0, 250)}`);
+      }
+
+      entries.push(`${rec} "${q}" — market ${mktPct}%, data says ${implied}, betting ${opp.outcome.toUpperCase()}${aligned ? "" : " (AGAINST data direction)"} (${elapsed}s)`);
       if (scoreResult.detail) {
-        entries.push(`[palpha]   reasoning: ${scoreResult.detail.trim().slice(0, 300)}`);
+        entries.push(`  Why: ${scoreResult.detail.trim().slice(0, 300)}`);
       }
       return { opp, enriched: true, vetoed: false };
     } catch (err) {
@@ -655,7 +662,7 @@ export async function cmdAutoTrade(args, opts = {}) {
 
   // 6. Evaluate scanner signals
   const rawOpportunities = evaluateSignals(signals, tradeFlows || [], markets, atState.dailySpend, maxDay);
-  log.push(`Evaluated ${rawOpportunities.length} raw opportunities from scanner signals`);
+  log.push(`Found ${rawOpportunities.length} potential trades from scanner`);
 
   // 7. Palpha enrichment + hard gate
   let opportunities = rawOpportunities;
@@ -756,7 +763,7 @@ export async function cmdAutoTrade(args, opts = {}) {
     log.push(`[auto-trade] Warning: data-API position fetch failed (${err.message}), using local state`);
   }
   if (dustCount > 0) {
-    log.push(`[auto-trade] Ignoring ${dustCount} dust positions (value < $${DUST_VALUE_THRESHOLD}). Active: ${currentOpenPositions}/${totalPositions} total.`);
+    log.push(`${currentOpenPositions} active positions (${dustCount} dust ignored)`);
   }
   // Track event slugs traded THIS cycle to avoid duplicates
   const tradedEventSlugs = new Set();
@@ -852,16 +859,21 @@ export async function cmdAutoTrade(args, opts = {}) {
     dashEntries.push({ timestamp: iso(), type: "palpha", message: msg });
   }
   for (const t of tradesExecuted) {
-    let msg = `[auto-trade] EXECUTED: ${t.outcome} $${t.amount} on "${(t.question || "").slice(0, 50)}" @ ${(t.entryPrice * 100).toFixed(1)}% | ${t.reason}`;
-    if (t.palphaRec) msg += ` | palpha=${t.palphaRec}`;
-    msg += ` | order=${t.orderId || "n/a"}`;
+    let msg = `Bought ${t.outcome.toUpperCase()} $${t.amount} on "${(t.question || "").slice(0, 60)}" @ ${(t.entryPrice * 100).toFixed(1)}%`;
+    if (t.reason) msg += ` — ${t.reason}`;
     dashEntries.push({ timestamp: iso(), type: "trade", message: msg });
   }
   if (tradesExecuted.length === 0 && skipped.length > 0) {
-    const reasons = [...new Set(skipped.map(s => s.reason))].join(", ");
-    dashEntries.push({ timestamp: iso(), type: "trade", message: `[auto-trade] No trades: ${reasons}. Daily: $${currentSpend.toFixed(2)}` });
+    // Group skip reasons into human-readable summary
+    const reasonCounts = {};
+    for (const s of skipped) {
+      const r = s.reason.replace(/:.*/,"").replace(/spread too wide.*/, "spread too wide").replace(/same-event dedup.*/, "same-event dedup");
+      reasonCounts[r] = (reasonCounts[r] || 0) + 1;
+    }
+    const summary = Object.entries(reasonCounts).map(([r, n]) => n > 1 ? `${r} (${n})` : r).join(", ");
+    dashEntries.push({ timestamp: iso(), type: "trade", message: `No trades this cycle — ${summary}. Spent $${currentSpend.toFixed(0)} today.` });
   } else if (tradesExecuted.length === 0 && skipped.length === 0) {
-    dashEntries.push({ timestamp: iso(), type: "palpha", message: `[auto-trade] Cycle ${signalData.cycle || "?"}: ${rawOpportunities.length} raw opps, ${opportunities.length} after enrichment, ${palphaVetoed} vetoed. No actionable trades. Daily: $${currentSpend.toFixed(2)}` });
+    dashEntries.push({ timestamp: iso(), type: "palpha", message: `Evaluated ${rawOpportunities.length} opportunities, ${palphaVetoed} didn't have enough edge. Nothing actionable. Spent $${currentSpend.toFixed(0)} today.` });
   }
   if (!skipDashboardPush) await pushToDashboard(dashEntries);
 
