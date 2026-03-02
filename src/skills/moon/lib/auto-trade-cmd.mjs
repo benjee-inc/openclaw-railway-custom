@@ -182,6 +182,7 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
     if (flow.imbalance < 0.6 || flow.total < 2000) continue;
     const market = resolveMarket(flow);
     if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
+    if ((market.prices?.[0] || 0) < MIN_PRICE) continue;
     if (isSportsMarket(flow.q || market.question || "")) continue;
     const condId = flow.conditionId || market.conditionId;
     if (!condId) continue;
@@ -195,6 +196,7 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
       reason: `Flow signal: ${flow.netFlow > 0 ? "BUY" : "SELL"} bias ${(flow.imbalance * 100).toFixed(0)}%, $${flow.total.toFixed(0)} volume`,
       signalType: "flow", score: flow.score * 2,
       question: flow.q, liquidity: market.liquidity,
+      _signalContext: `Flow signal detected — ${flow.netFlow > 0 ? "BUY" : "SELL"} bias ${(flow.imbalance * 100).toFixed(0)}%, $${flow.total.toFixed(0)} volume in recent trades.`,
     });
   }
 
@@ -215,6 +217,7 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
       reason: `Hourly momentum: ${m.dir}${(Math.abs(m.change1h) * 100).toFixed(1)}% in 1h, now ${(m.price * 100).toFixed(1)}%`,
       signalType: "momentum", score: m.score * 1.5,
       question: m.q, liquidity: market.liquidity,
+      _signalContext: `Momentum signal — price moved ${m.dir}${(Math.abs(m.change1h) * 100).toFixed(1)}% in the last hour, now at ${(m.price * 100).toFixed(1)}%.`,
     });
   }
 
@@ -236,6 +239,7 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
       reason: `Wide spread: ${(m.spread * 100).toFixed(1)}% spread (bid ${(m.bid * 100).toFixed(1)}% / ask ${(m.ask * 100).toFixed(1)}%), limit @ ${(midpoint * 100).toFixed(1)}%`,
       signalType: "spread", score: m.score,
       question: m.q, liquidity: market.liquidity,
+      _signalContext: `Wide spread detected — ${(m.spread * 100).toFixed(1)}% spread between bid ${(m.bid * 100).toFixed(1)}% and ask ${(m.ask * 100).toFixed(1)}%. Possible liquidity inefficiency.`,
     });
   }
 
@@ -259,6 +263,7 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
       reason: `Catalyst: ${m.hrsLeft.toFixed(0)}h to resolution, ${(m.price * 100).toFixed(1)}% YES, betting ${outcome.toUpperCase()}`,
       signalType: "catalyst", score: m.score * 0.8,
       question: m.q, liquidity: market.liquidity,
+      _signalContext: `Catalyst signal — market resolves in ${m.hrsLeft.toFixed(0)} hours, currently at ${(m.price * 100).toFixed(1)}% YES. Near-expiry convergence opportunity.`,
     });
   }
 
@@ -292,9 +297,9 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       const market = mktMap.get(opp.conditionId);
       if (!market) return { opp, enriched: false };
 
-      // 1. Categorize
+      // 1. Categorize + attach signal context for Grok
       const { category } = categorize(market.question || "");
-      const enrichedMarket = { ...market, _category: category };
+      const enrichedMarket = { ...market, _category: category, _signalContext: opp._signalContext || null };
 
       // 2. Match + fetch alt data (Grok needs 15-25s for x_search + web_search)
       const matchResult = match(enrichedMarket);

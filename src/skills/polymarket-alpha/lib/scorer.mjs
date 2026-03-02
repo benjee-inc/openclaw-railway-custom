@@ -105,11 +105,11 @@ function scoreWeather(market, altData, params, marketPrice) {
     detail += ` Google Trends: breakout interest detected.`;
   }
 
-  // Grok X/web search modifier
+  // Grok is the sole decision-maker — its probability and confidence override all other sources
   const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
   if (grokResult.applied) {
     impliedProb = grokResult.impliedProb;
-    confidence = Math.min(0.95, confidence + grokResult.confidenceBoost);
+    if (grokResult.grokConfidence != null) confidence = grokResult.grokConfidence;
     detail += grokResult.detail;
   }
 
@@ -349,15 +349,11 @@ function scoreCrypto(market, altData, params, marketPrice) {
     }
   }
 
-  // Grok X/web search modifier
+  // Grok is the sole decision-maker — its probability and confidence override all other sources
   const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
   if (grokResult.applied) {
-    if (impliedProb != null) {
-      impliedProb = grokResult.impliedProb;
-    } else {
-      impliedProb = grokResult.impliedProb;
-    }
-    confidence = Math.min(0.70, confidence + grokResult.confidenceBoost);
+    impliedProb = grokResult.impliedProb;
+    if (grokResult.grokConfidence != null) confidence = grokResult.grokConfidence;
     detail += grokResult.detail;
   }
 
@@ -426,11 +422,11 @@ function scoreEconomics(market, altData, params, marketPrice) {
     detail += metaculusResult.detail;
   }
 
-  // Grok X/web search modifier
+  // Grok is the sole decision-maker — its probability and confidence override all other sources
   const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
   if (grokResult.applied) {
     impliedProb = grokResult.impliedProb;
-    confidence = Math.min(0.75, confidence + grokResult.confidenceBoost);
+    if (grokResult.grokConfidence != null) confidence = grokResult.grokConfidence;
     detail += grokResult.detail;
   }
 
@@ -548,22 +544,18 @@ function scoreGeopolitics(market, altData, params, marketPrice) {
     details.push(metaculusResult.detail);
   }
 
-  // Grok X/web search modifier
+  // Grok is the sole decision-maker — its probability and confidence override all other sources
   const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
   if (grokResult.applied) {
     impliedProb = grokResult.impliedProb;
-    confidence = Math.min(0.60, confidence + grokResult.confidenceBoost);
+    if (grokResult.grokConfidence != null) confidence = grokResult.grokConfidence;
     details.push(grokResult.detail);
   }
 
-  // Trends modifier
+  // Trends modifier (context only — does not affect probability)
   if (altData.trends?.isBreakout) {
     sources.push("trends");
     details.push(`Google Trends: breakout search interest on "${altData.trends.keyword}".`);
-    if (impliedProb != null) {
-      impliedProb = Math.min(0.90, impliedProb + 0.03);
-      confidence = Math.min(0.55, confidence + 0.03);
-    }
   }
 
   if (impliedProb === null) {
@@ -673,15 +665,15 @@ function scoreTech(market, altData, params, marketPrice) {
     details.push(metaculusResult.detail);
   }
 
-  // Grok X/web search modifier
+  // Grok is the sole decision-maker — its probability and confidence override all other sources
   const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
   if (grokResult.applied) {
     impliedProb = grokResult.impliedProb;
-    confidence = Math.min(0.60, confidence + grokResult.confidenceBoost);
+    if (grokResult.grokConfidence != null) confidence = grokResult.grokConfidence;
     details.push(grokResult.detail);
   }
 
-  // Trends modifier
+  // Trends modifier (context only)
   if (altData.trends?.isBreakout) {
     sources.push("trends");
     details.push(`Google Trends: breakout search interest on "${altData.trends.keyword}".`);
@@ -726,22 +718,18 @@ function scorePoliticsGeneric(market, altData, params, marketPrice) {
     details.push(metaculusResult.detail);
   }
 
-  // Grok X/web search modifier
+  // Grok is the sole decision-maker — its probability and confidence override all other sources
   const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
   if (grokResult.applied) {
     impliedProb = grokResult.impliedProb;
-    confidence = Math.min(0.55, confidence + grokResult.confidenceBoost);
+    if (grokResult.grokConfidence != null) confidence = grokResult.grokConfidence;
     details.push(grokResult.detail);
   }
 
-  // Trends modifier
+  // Trends modifier (context only)
   if (altData.trends?.isBreakout) {
     sources.push("trends");
     details.push(`Google Trends: breakout search interest on "${altData.trends.keyword}".`);
-    if (impliedProb != null) {
-      // Don't shift probability for trends alone — it's directionally ambiguous
-      confidence = Math.min(0.50, confidence + 0.03);
-    }
   }
 
   // GDELT supplements
@@ -811,11 +799,11 @@ function scoreFromGdelt(altData, marketPrice, existingSources, baseConfidence) {
   let confidence = baseConfidence;
   let detail = `GDELT: ${gd.recent} articles (${gd.ratio.toFixed(1)}x volume), tone ${gd.currentTone.toFixed(1)} (delta ${gd.toneDelta > 0 ? "+" : ""}${gd.toneDelta.toFixed(1)}).`;
 
-  // Grok X/web search modifier
+  // Grok is the sole decision-maker — its probability and confidence override all other sources
   const grokResult = applyGrokModifier(altData, marketPrice, sources, impliedProb);
   if (grokResult.applied) {
     impliedProb = grokResult.impliedProb;
-    confidence = Math.min(0.50, confidence + grokResult.confidenceBoost);
+    if (grokResult.grokConfidence != null) confidence = grokResult.grokConfidence;
     detail += grokResult.detail;
   }
 
@@ -874,35 +862,29 @@ function applyMetaculusModifier(altData, marketPrice, sources, currentImplied) {
 
 function applyGrokModifier(altData, marketPrice, sources, currentImplied) {
   if (!altData.grok) {
-    return { applied: false, impliedProb: currentImplied, confidenceBoost: 0, detail: "" };
+    // No Grok = no trade. Force NOISE by returning zero confidence/alpha.
+    return { applied: true, impliedProb: marketPrice, confidenceBoost: 0, grokConfidence: 0, detail: " Grok: unavailable — vetoing opportunity." };
   }
 
   const grok = altData.grok;
   const grokProb = grok.probability;
   if (grokProb == null || isNaN(grokProb)) {
-    return { applied: false, impliedProb: currentImplied, confidenceBoost: 0, detail: "" };
+    return { applied: true, impliedProb: marketPrice, confidenceBoost: 0, grokConfidence: 0, detail: " Grok: invalid response — vetoing opportunity." };
   }
 
   sources.push("grok");
 
-  const confidenceBoost = grok.confidence === "high" ? 0.15
-    : grok.confidence === "medium" ? 0.10 : 0.04;
+  // Grok is the sole decision-maker: its probability overrides all other sources.
+  const newImplied = grokProb;
 
-  // Blend weight: Grok uses real-time X/web search — give it dominant weight
-  const grokWeight = grok.confidence === "high" ? 0.60
-    : grok.confidence === "medium" ? 0.45 : 0.25;
-
-  let newImplied;
-  if (currentImplied != null) {
-    newImplied = currentImplied * (1 - grokWeight) + grokProb * grokWeight;
-  } else {
-    newImplied = grokProb;
-  }
+  // Confidence maps directly from Grok's self-assessed confidence
+  const grokConfidence = grok.confidence === "high" ? 0.70
+    : grok.confidence === "medium" ? 0.50 : 0.30;
 
   const signals = grok.keySignals?.length > 0 ? ` Signals: ${grok.keySignals.slice(0, 3).join("; ")}.` : "";
   const comparison = grok.marketComparison ? ` vs Market: ${grok.marketComparison}` : "";
   const detail = ` Grok: ${(grokProb * 100).toFixed(0)}% (${grok.confidence}). ${grok.reasoning || ""}${signals}${comparison}`;
-  return { applied: true, impliedProb: newImplied, confidenceBoost, detail };
+  return { applied: true, impliedProb: newImplied, confidenceBoost: 0, grokConfidence, detail };
 }
 
 /**

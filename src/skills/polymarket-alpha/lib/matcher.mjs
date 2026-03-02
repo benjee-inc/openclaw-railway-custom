@@ -397,9 +397,9 @@ export async function fetchAltData(market, matchResult) {
       case "grok":
         promises.push(withTimeout(
           import("./sources/grok.mjs")
-            .then((g) => g.analyzeMarket(market.question, market._category, market.prices?.[0] || 0.5))
+            .then((g) => g.analyzeMarket(market.question, market._category, market.prices?.[0] || 0.5, market._signalContext || null))
             .then((r) => { if (r) data.grok = r; }),
-          55_000, "grok",
+          160_000, "grok",  // 160s — allows 75s×2 attempts + backoff
         ));
         break;
     }
