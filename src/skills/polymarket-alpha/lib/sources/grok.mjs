@@ -59,7 +59,7 @@ export async function analyzeMarket(question, category, marketPrice) {
         tools: [{ type: "x_search" }, { type: "web_search" }],
         temperature: 0,
       }),
-      signal: AbortSignal.timeout(25_000),
+      signal: AbortSignal.timeout(50_000),
     });
 
     if (!res.ok) {
