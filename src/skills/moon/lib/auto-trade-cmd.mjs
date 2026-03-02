@@ -303,7 +303,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       // Log which sources actually returned data
       const gotSources = Object.keys(altData).filter(k => altData[k] != null);
       if (gotSources.length === 0) {
-        entries.push(`"${(market.question || "").slice(0, 60)}" — no data sources responded (check X_API_KEY and timeouts)`);
+        entries.push(`"${(market.question || "").slice(0, 60)}" — no data sources responded (check XAI_API_KEY and timeouts)`);
       }
 
       // 3. Score divergence
