@@ -289,6 +289,10 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
     if (m.conditionId) mktMap.set(m.conditionId, m);
   }
 
+  // Grok result cache by eventSlug — avoids calling Grok for every outcome
+  // of the same event (e.g., 3 TX primary candidates = 1 Grok call, not 3)
+  const grokEventCache = new Map();
+
   // Enrich a single market with its own timeout.
   // Two-phase: cheap sources first → quick score → only call Grok if promising.
   // Returns result even on timeout (marks as unenriched, keeps raw score).
@@ -307,31 +311,30 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       const SKIP_GROK = new Set(["grok"]);
       const cheapAltData = await fetchAltData(enrichedMarket, matchResult, { skipSources: SKIP_GROK });
 
-      // Pre-filter: check if cheap sources returned ANY useful data
-      // If zero cheap sources responded AND scanner score is low, skip Grok
-      // (no alt data to cross-reference = Grok operating blind on a weak signal)
-      const cheapSources = Object.keys(cheapAltData).filter(k => cheapAltData[k] != null);
-      const hasMetaculus = cheapAltData.metaculus != null;
-      const hasDomainData = cheapAltData.nws != null || cheapAltData.ensemble != null
-        || cheapAltData.coingecko != null || cheapAltData.fred != null
-        || cheapAltData.montecarlo?.mcImplied != null;
+      // Pre-filter: check if domain-specific cheap sources returned useful data.
+      // Generic sources (montecarlo, gdelt, trends) don't count — they always return
+      // something but provide no real edge for the Grok decision.
+      const DOMAIN_SOURCES = new Set(["nws", "ensemble", "coingecko", "fred", "metaculus", "coinglass", "opensky", "arxiv", "fear_greed"]);
+      const domainHits = Object.keys(cheapAltData).filter(k => cheapAltData[k] != null && DOMAIN_SOURCES.has(k));
 
-      if (cheapSources.length === 0 && opp.score < 5) {
+      if (domainHits.length === 0 && opp.score < 8) {
         const q = (market.question || "").slice(0, 60);
-        entries.push(`[pre-filter] "${q}" — zero cheap sources responded + weak scanner signal (score=${opp.score.toFixed(1)}), skipping Grok`);
-        return { opp, enriched: true, vetoed: true, reason: "pre-filter: no alt data + weak signal — Grok skipped" };
-      }
-
-      // If only metaculus matched (weak signal) and scanner score is low, also skip
-      if (!hasDomainData && !hasMetaculus && cheapSources.length <= 1 && opp.score < 3) {
-        const q = (market.question || "").slice(0, 60);
-        entries.push(`[pre-filter] "${q}" — minimal alt data (${cheapSources.join(",") || "none"}) + very weak signal, skipping Grok`);
-        return { opp, enriched: true, vetoed: true, reason: "pre-filter: minimal alt data + very weak signal — Grok skipped" };
+        entries.push(`[pre-filter] "${q}" — no domain data (score=${opp.score.toFixed(1)}), skipping Grok`);
+        return { opp, enriched: true, vetoed: true, reason: "pre-filter: no domain-specific data — Grok skipped" };
       }
 
       // 3. PHASE 2: Market looks promising — now call Grok only
-      const grokOnly = { sources: ["grok"], params: matchResult.params };
-      const grokData = await fetchAltData(enrichedMarket, grokOnly);
+      // Dedup by eventSlug: reuse Grok result for same-event markets
+      const eventSlug = market.eventSlug || null;
+      let grokData = {};
+      if (eventSlug && grokEventCache.has(eventSlug)) {
+        grokData = grokEventCache.get(eventSlug);
+        entries.push(`[grok-cache] "${(market.question || "").slice(0, 50)}" — reusing Grok result from event "${eventSlug}"`);
+      } else {
+        const grokOnly = { sources: ["grok"], params: matchResult.params };
+        grokData = await fetchAltData(enrichedMarket, grokOnly);
+        if (eventSlug && grokData.grok) grokEventCache.set(eventSlug, grokData);
+      }
       const altData = { ...cheapAltData, ...grokData };
 
       // Log which sources actually returned data
