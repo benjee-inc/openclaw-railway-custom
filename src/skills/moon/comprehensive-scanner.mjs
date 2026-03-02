@@ -696,13 +696,24 @@ async function autoTakeProfit() {
           const isWinner = tokens[ourIdx]?.winner;
 
           if (isWinner && size > 0) {
-            console.log(`[auto-redeem] Redeeming ${size.toFixed(1)} winning ${outcome.toUpperCase()} shares of "${title}"`);
+            const avgPrice = parseFloat(p.avgPrice || 0);
+            const cost = size * avgPrice;
+            const redeemValue = size; // winning shares pay $1 each
+            const cashPnl = redeemValue - cost;
+            console.log(`[auto-redeem] Redeeming ${size.toFixed(1)} winning ${outcome.toUpperCase()} shares of "${title}" (cost $${cost.toFixed(2)}, pnl $${cashPnl.toFixed(2)})`);
             try {
               const result = await redeemPosition(cid, market.negRisk, market.clobTokenIds || []);
               entries.push({
                 timestamp: new Date().toISOString(),
-                type: "trade",
+                type: "redeem",
                 message: `[auto-redeem] Redeemed ${outcome.toUpperCase()} ${size.toFixed(1)} shares of "${title}" → tx=${result.txHash}`,
+                cashPnl: cashPnl.toFixed(4),
+                cost: cost.toFixed(4),
+                value: redeemValue.toFixed(4),
+                title: p.title || "",
+                outcome,
+                size: size.toFixed(4),
+                avgPrice: avgPrice.toFixed(4),
               });
             } catch (err) {
               console.error(`[auto-redeem] failed "${title}": ${err.message}`);
