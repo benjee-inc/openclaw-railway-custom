@@ -274,10 +274,10 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
 // ── Palpha enrichment ────────────────────────────────────
 
 // Per-market enrichment timeout. Each market gets its own deadline.
-// Grok x_search + web_search can take 15-25s, so give each market 30s.
-const ENRICH_PER_MARKET_MS = 30_000;
-// Global safety net — 5 markets × 30s = 150s max, but they run in parallel.
-const ENRICH_GLOBAL_MS = 60_000;
+// Grok is sole decision-maker — needs up to 3 min for web_search + x_search + retries.
+const ENRICH_PER_MARKET_MS = 180_000; // 3 minutes
+// Global safety net — markets run in parallel so this just caps total wall time.
+const ENRICH_GLOBAL_MS = 240_000; // 4 minutes
 
 async function enrichWithPalpha(opportunities, markets, topN = 5) {
   const entries = [];
