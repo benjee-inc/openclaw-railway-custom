@@ -926,10 +926,12 @@ export async function cmdAutoTrade(args, opts = {}) {
     setAutoTraderLastCycle(signalData.cycle);
   }
 
-  // 11. Push palpha + trade entries to dashboard
+  // 11. Push palpha + trade entries to dashboard (skip veto/debug spam)
   const iso = () => new Date().toISOString();
   const dashEntries = [];
+  const DASH_SKIP = /^\[palpha\] VETOED:|^\[veto-cache\]|^\[pre-filter\]|^\[palpha\] Timeout on|^\[grok-cache\]|^\[sizing\]|^\[data\]|^Skipping "|^\[network\]\s+\d|^\[auto-trade\] Warning:/;
   for (const msg of log) {
+    if (DASH_SKIP.test(msg)) continue;
     dashEntries.push({ timestamp: iso(), type: "palpha", message: msg });
   }
   for (const t of tradesExecuted) {
