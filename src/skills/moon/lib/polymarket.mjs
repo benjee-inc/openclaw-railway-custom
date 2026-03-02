@@ -303,11 +303,16 @@ export async function redeemPosition(conditionId, negRisk = false, tokenIds = []
       return { success: true, txHash: "no-tokens-to-redeem", gasUsed: "0" };
     }
     const adapter = new ethers.Contract(NEG_RISK_ADAPTER, NEG_RISK_ABI, wallet);
-    // Polygon requires ~30 gwei min tip; fetch current fee data to be safe
+    // Polygon requires ~25-30 gwei min tip; use max(provider, floor) since provider can return stale low values
     const feeData = await provider.getFeeData();
+    const parseGwei = (n) => ethers.parseUnits?.(n, "gwei") ?? ethers.utils.parseUnits(n, "gwei");
+    const minTip = parseGwei("35");
+    const minFee = parseGwei("200");
+    const providerTip = feeData.maxPriorityFeePerGas ?? 0n;
+    const providerFee = feeData.maxFeePerGas ?? 0n;
     const gasOpts = {
-      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || ethers.parseUnits?.("35", "gwei") || ethers.utils.parseUnits("35", "gwei"),
-      maxFeePerGas: feeData.maxFeePerGas || ethers.parseUnits?.("200", "gwei") || ethers.utils.parseUnits("200", "gwei"),
+      maxPriorityFeePerGas: providerTip > minTip ? providerTip : minTip,
+      maxFeePerGas: providerFee > minFee ? providerFee : minFee,
     };
     const tx = await adapter.redeemPositions(conditionId, amounts, gasOpts);
     const receipt = await tx.wait();
@@ -315,9 +320,14 @@ export async function redeemPosition(conditionId, negRisk = false, tokenIds = []
   } else {
     const ctf = new ethers.Contract(CTF_ADDRESS, CTF_ABI, wallet);
     const feeData = await provider.getFeeData();
+    const parseGwei = (n) => ethers.parseUnits?.(n, "gwei") ?? ethers.utils.parseUnits(n, "gwei");
+    const minTip = parseGwei("35");
+    const minFee = parseGwei("200");
+    const providerTip = feeData.maxPriorityFeePerGas ?? 0n;
+    const providerFee = feeData.maxFeePerGas ?? 0n;
     const gasOpts = {
-      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || ethers.parseUnits?.("35", "gwei") || ethers.utils.parseUnits("35", "gwei"),
-      maxFeePerGas: feeData.maxFeePerGas || ethers.parseUnits?.("200", "gwei") || ethers.utils.parseUnits("200", "gwei"),
+      maxPriorityFeePerGas: providerTip > minTip ? providerTip : minTip,
+      maxFeePerGas: providerFee > minFee ? providerFee : minFee,
     };
     // indexSets: [1, 2] = YES (0b01) and NO (0b10) outcomes
     const tx = await ctf.redeemPositions(
