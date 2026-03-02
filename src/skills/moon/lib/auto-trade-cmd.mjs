@@ -309,6 +309,8 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       const gotSources = Object.keys(altData).filter(k => altData[k] != null);
       if (gotSources.length === 0) {
         entries.push(`"${(market.question || "").slice(0, 60)}" — no data sources responded (check XAI_API_KEY and timeouts)`);
+      } else {
+        entries.push(`[data] "${(market.question || "").slice(0, 50)}" — sources: ${gotSources.join(", ")}`);
       }
 
       // 3. Score divergence
@@ -353,7 +355,10 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
         const mktPct = ((market.prices?.[0] || 0) * 100).toFixed(1);
         const srcs = scoreResult.sources || [];
 
-        // Log Grok's full analysis
+        // Log alt data detail + Grok's full analysis
+        if (scoreResult.detail) {
+          entries.push(`[alt] "${q}" — ${scoreResult.detail.trim().slice(0, 400)}`);
+        }
         if (altData?.grok) {
           const g = altData.grok;
           entries.push(`[grok] "${q}" → ${(g.probability * 100).toFixed(0)}% (${g.confidence}) — ${(g.reasoning || "No clear signal").slice(0, 400)}`);
@@ -392,7 +397,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
 
       entries.push(`Buying ${opp.outcome.toUpperCase()} on "${q}" — market @ ${mktPct}%${aligned ? "" : " (contrarian bet)"}`);
       if (scoreResult.detail) {
-        entries.push(`  ${scoreResult.detail.trim().slice(0, 300)}`);
+        entries.push(`[alt] ${scoreResult.detail.trim().slice(0, 400)}`);
       }
       return { opp, enriched: true, vetoed: false };
     } catch (err) {
