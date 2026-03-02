@@ -219,11 +219,11 @@ function withTimeout(promise, ms, label) {
   return Promise.race([
     promise,
     new Promise((resolve) => setTimeout(() => {
-      // Silently resolve — the data slot stays empty, scorer falls back
+      console.log(`[matcher] ${label} timed out after ${ms / 1000}s`);
       resolve();
     }, ms)),
-  ]).catch(() => {
-    // Swallow errors — individual source failures are non-fatal
+  ]).catch((err) => {
+    console.error(`[matcher] ${label} error: ${err.message}`);
   });
 }
 
