@@ -336,16 +336,19 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
 
       // 8. Hard gate: only ACTIONABLE/NOTABLE pass through
       if (rec !== "ACTIONABLE" && rec !== "NOTABLE") {
-        const alphaPct = (scoreResult.alpha * 100).toFixed(1);
-        const confPct = ((scoreResult.confidence || 0) * 100).toFixed(0);
-        const srcList = (scoreResult.sources || []).join(",");
         const mktPct = ((market.prices?.[0] || 0) * 100).toFixed(1);
         const implied = scoreResult.altDataImplied != null ? (scoreResult.altDataImplied * 100).toFixed(1) + "%" : "n/a";
-        const dir = scoreResult.direction || "?";
-        const needs = rec === "MONITOR"
-          ? `needs alpha≥8%+conf≥35% for NOTABLE`
-          : `needs alpha≥3% for MONITOR`;
-        return { opp, enriched: true, vetoed: true, reason: `rec=${rec} alpha=${alphaPct}% conf=${confPct}% | mkt=${mktPct}% implied=${implied} dir=${dir} src=[${srcList}] | ${needs}` };
+        const srcList = (scoreResult.sources || []).join(",");
+
+        // Log what Grok thought (even on veto) so we can see its reasoning
+        if (altData?.grok?.probability != null) {
+          const g = altData.grok;
+          const grokPct = (g.probability * 100).toFixed(0);
+          const signals = g.keySignals?.length > 0 ? g.keySignals.slice(0, 3).join("; ") : "";
+          entries.push(`[grok] "${(market.question || "").slice(0, 60)}" → ${grokPct}% (${g.confidence || "?"}) | mkt=${mktPct}% | ${g.reasoning || ""}${signals ? " | " + signals : ""}`);
+        }
+
+        return { opp, enriched: true, vetoed: true, reason: `${rec} — mkt=${mktPct}% implied=${implied} src=[${srcList}]` };
       }
 
       opp._palphaRec = rec;
