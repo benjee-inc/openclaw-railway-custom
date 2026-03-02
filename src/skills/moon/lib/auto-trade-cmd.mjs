@@ -353,12 +353,14 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
         const mktPct = ((market.prices?.[0] || 0) * 100).toFixed(1);
         const srcs = scoreResult.sources || [];
 
-        // Log Grok's reasoning
+        // Log Grok's full analysis
         if (altData?.grok) {
           const g = altData.grok;
-          entries.push(`"${q}" — ${(g.reasoning || "No clear signal").slice(0, 300)}`);
+          entries.push(`[grok] "${q}" → ${(g.probability * 100).toFixed(0)}% (${g.confidence}) — ${(g.reasoning || "No clear signal").slice(0, 400)}`);
+          if (g.keySignals?.length > 0) entries.push(`[grok] signals: ${g.keySignals.join(" | ")}`);
+          if (g.marketComparison) entries.push(`[grok] vs market: ${g.marketComparison}`);
         } else {
-          entries.push(`"${q}" — couldn't get a read on this one`);
+          entries.push(`[grok] "${q}" — unavailable (timeout or no API key)`);
         }
 
         return { opp, enriched: true, vetoed: true, reason: `not enough edge` };
@@ -380,9 +382,12 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       const aligned = (scannerBuyingYes && palphaFavorsYes) || (!scannerBuyingYes && !palphaFavorsYes);
       const q = (market.question || "").slice(0, 60);
 
-      // Grok's take
+      // Grok's full analysis
       if (altData?.grok) {
-        entries.push(`"${q}" — ${(altData.grok.reasoning || "").slice(0, 300)}`);
+        const g = altData.grok;
+        entries.push(`[grok] "${q}" → ${(g.probability * 100).toFixed(0)}% (${g.confidence}) — ${(g.reasoning || "").slice(0, 400)}`);
+        if (g.keySignals?.length > 0) entries.push(`[grok] signals: ${g.keySignals.join(" | ")}`);
+        if (g.marketComparison) entries.push(`[grok] vs market: ${g.marketComparison}`);
       }
 
       entries.push(`Buying ${opp.outcome.toUpperCase()} on "${q}" — market @ ${mktPct}%${aligned ? "" : " (contrarian bet)"}`);
@@ -392,18 +397,18 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       return { opp, enriched: true, vetoed: false };
     } catch (err) {
       entries.push(`[palpha] Error: "${(opp.question || "").slice(0, 50)}": ${err.message}`);
-      return { opp, enriched: false };
+      return { opp, enriched: true, vetoed: true, reason: `enrichment error: ${err.message}` };
     }
   }
 
   // Run each market enrichment with its own per-market timeout.
-  // Partial results are kept — a timeout on market #3 doesn't discard markets #1 and #2.
+  // Timeout = veto. Grok is the sole decision-maker — no Grok response means no trade.
   const enrichPromises = top.map((opp) =>
     Promise.race([
       enrichOne(opp),
       new Promise((resolve) => setTimeout(() => {
-        entries.push(`[palpha] Timeout on "${(opp.question || "").slice(0, 50)}" after ${ENRICH_PER_MARKET_MS / 1000}s — using raw score`);
-        resolve({ opp, enriched: false });
+        entries.push(`[palpha] Timeout on "${(opp.question || "").slice(0, 50)}" after ${ENRICH_PER_MARKET_MS / 1000}s — vetoed (no Grok)`);
+        resolve({ opp, enriched: true, vetoed: true, reason: "enrichment timeout — Grok unavailable" });
       }, ENRICH_PER_MARKET_MS)),
     ]),
   );
@@ -415,9 +420,8 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
 
   const winner = await Promise.race([allSettled, globalTimeout]);
   if (winner === null) {
-    // Global timeout hit — but some per-market promises may have already resolved.
-    // allSettled is still pending; we can't await it. Use whatever we logged.
-    entries.push(`[palpha] Global timeout after ${ENRICH_GLOBAL_MS / 1000}s. Using partial results.`);
+    // Global timeout hit — veto everything. No Grok = no trade.
+    entries.push(`[palpha] Global timeout after ${ENRICH_GLOBAL_MS / 1000}s. All opportunities vetoed.`);
     results = [];
   } else {
     results = winner;
@@ -439,10 +443,11 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
     enrichedOpps.push(opp);
   }
 
-  // Append remaining non-top opportunities AND any top opps that timed out (keep raw score)
+  // Only pass through opportunities that were NOT in the top-N enrichment set.
+  // Top-N opps that timed out or errored are vetoed — no Grok = no trade.
   const topIds = new Set(top.map((o) => o.conditionId));
   for (const opp of opportunities) {
-    if (!topIds.has(opp.conditionId) || (topIds.has(opp.conditionId) && !processedIds.has(opp.conditionId))) {
+    if (!topIds.has(opp.conditionId)) {
       enrichedOpps.push(opp);
     }
   }
