@@ -234,12 +234,14 @@ const SOURCE_TIMEOUT = 8_000; // 8s per source — well under the enrichment dea
  * Returns collected data from all matched sources.
  * Each source gets an 8s timeout so no single slow API stalls enrichment.
  */
-export async function fetchAltData(market, matchResult) {
+export async function fetchAltData(market, matchResult, opts = {}) {
   const { sources, params } = matchResult;
+  const skipSources = opts.skipSources || null; // Set of source names to skip
   const data = {};
   const promises = [];
 
   for (const src of sources) {
+    if (skipSources && skipSources.has(src)) continue;
     switch (src) {
       case "nws":
         if (params.city) {

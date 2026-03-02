@@ -25,6 +25,14 @@ const DEFAULT_STATE = {
     recentTrades: {},     // { conditionId: timestampMs } — 30min cooldown
     lastCycle: null,      // prevent processing same cycle twice
   },
+  dailyPnl: {
+    date: null,           // "2026-03-01" — resets at midnight UTC
+    realizedPnl: 0,       // sum of closed trades PnL today
+    realizedCount: 0,     // number of closed trades today
+    lastUnrealizedPnl: 0, // snapshot of unrealized P&L from last scan
+    lastPortfolioValue: 0,// total portfolio value at last check
+    lastChecked: null,    // ISO timestamp of last P&L check
+  },
 };
 
 // ─── Path Resolution ────────────────────────────────────────────────────────
@@ -254,4 +262,39 @@ export function isRecentlyAutoTraded(conditionId) {
   const ts = at.recentTrades?.[conditionId];
   if (!ts) return false;
   return (Date.now() - ts) < TRADE_COOLDOWN_MS;
+}
+
+// ─── Daily P&L Tracking ──────────────────────────────────────────────────────
+
+export function getDailyPnl() {
+  const state = loadState();
+  const pnl = state.dailyPnl || {};
+  const today = new Date().toISOString().slice(0, 10);
+  if (pnl.date !== today) {
+    return { date: today, realizedPnl: 0, realizedCount: 0, lastUnrealizedPnl: 0, lastPortfolioValue: 0, lastChecked: null };
+  }
+  return pnl;
+}
+
+export function recordRealizedPnl(amount) {
+  const state = loadState();
+  const today = new Date().toISOString().slice(0, 10);
+  if (!state.dailyPnl || state.dailyPnl.date !== today) {
+    state.dailyPnl = { date: today, realizedPnl: 0, realizedCount: 0, lastUnrealizedPnl: 0, lastPortfolioValue: 0, lastChecked: null };
+  }
+  state.dailyPnl.realizedPnl += amount;
+  state.dailyPnl.realizedCount += 1;
+  saveState(state);
+}
+
+export function updateUnrealizedPnl(unrealizedPnl, portfolioValue) {
+  const state = loadState();
+  const today = new Date().toISOString().slice(0, 10);
+  if (!state.dailyPnl || state.dailyPnl.date !== today) {
+    state.dailyPnl = { date: today, realizedPnl: 0, realizedCount: 0, lastUnrealizedPnl: 0, lastPortfolioValue: 0, lastChecked: null };
+  }
+  state.dailyPnl.lastUnrealizedPnl = unrealizedPnl;
+  state.dailyPnl.lastPortfolioValue = portfolioValue;
+  state.dailyPnl.lastChecked = new Date().toISOString();
+  saveState(state);
 }

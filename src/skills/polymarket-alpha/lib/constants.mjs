@@ -34,7 +34,7 @@ export const TTL = {
   metaculus: 30 * 60_000,
   trends: 15 * 60_000,
   montecarlo: 5 * 60_000,
-  grok: 5 * 60_000,
+  grok: 30 * 60_000,
 };
 
 // ── Sports filter (reused from comprehensive-scanner) ──────

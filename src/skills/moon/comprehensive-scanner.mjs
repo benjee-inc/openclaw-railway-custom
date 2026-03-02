@@ -648,8 +648,8 @@ async function getWalletAddress() {
 
 // ── Auto-sell: take profit + stop loss ────────────────────
 
-const TAKE_PROFIT_PCT = 200;  // sell when position is up 200%+
-const STOP_LOSS_PCT = -30;    // sell when position is down 30%+
+const TAKE_PROFIT_PCT = 50;   // sell when position is up 50%+ — faster turnover for 2% daily target
+const STOP_LOSS_PCT = -25;    // sell when position is down 25%+ — tighter stop to preserve capital
 const MIN_EXIT_PRICE = 0.005; // never sell below 0.5¢ — better to let it expire worthless than give away shares
 
 async function autoTakeProfit() {
@@ -706,7 +706,7 @@ async function autoTakeProfit() {
               entries.push({
                 timestamp: new Date().toISOString(),
                 type: "redeem",
-                message: `[auto-redeem] Redeemed ${outcome.toUpperCase()} ${size.toFixed(1)} shares of "${title}" → tx=${result.txHash}`,
+                message: `[auto-redeem] Redeemed ${outcome.toUpperCase()} ${size.toFixed(1)} shares of "${title}" → tx=${result.txHash} (P&L: +$${cashPnl.toFixed(2)})`,
                 cashPnl: cashPnl.toFixed(4),
                 cost: cost.toFixed(4),
                 value: redeemValue.toFixed(4),
@@ -715,6 +715,11 @@ async function autoTakeProfit() {
                 size: size.toFixed(4),
                 avgPrice: avgPrice.toFixed(4),
               });
+              // Track realized P&L for daily summary
+              try {
+                const { recordRealizedPnl } = await import("./lib/state.mjs");
+                recordRealizedPnl(cashPnl);
+              } catch {}
             } catch (err) {
               console.error(`[auto-redeem] failed "${title}": ${err.message}`);
             }
@@ -763,12 +768,20 @@ async function autoTakeProfit() {
 
         if (result.success) {
           const proceeds = parseFloat(result.takingAmount || 0);
-          console.log(`[auto-sell] ${sellReason}: "${title}" — ${size.toFixed(1)} shares @ ${curPrice} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(0)}%) → $${proceeds.toFixed(2)}`);
+          const avgPrice = parseFloat(p.avgPrice || 0);
+          const cost = size * avgPrice;
+          const cashPnl = proceeds - cost;
+          console.log(`[auto-sell] ${sellReason}: "${title}" — ${size.toFixed(1)} shares @ ${curPrice} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(0)}%) → $${proceeds.toFixed(2)} (P&L: ${cashPnl >= 0 ? "+" : ""}$${cashPnl.toFixed(2)})`);
           entries.push({
             timestamp: new Date().toISOString(),
             type: "trade",
-            message: `${sellReason}: Sold "${title}" — ${size.toFixed(0)} shares @ ${(curPrice * 100).toFixed(1)}¢ (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(0)}%) for $${proceeds.toFixed(2)}`,
+            message: `${sellReason}: Sold "${title}" — ${size.toFixed(0)} shares @ ${(curPrice * 100).toFixed(1)}¢ (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(0)}%) for $${proceeds.toFixed(2)} (P&L: ${cashPnl >= 0 ? "+" : ""}$${cashPnl.toFixed(2)})`,
           });
+          // Track realized P&L for daily summary
+          try {
+            const { recordRealizedPnl } = await import("./lib/state.mjs");
+            recordRealizedPnl(cashPnl);
+          } catch {}
         }
       } catch (err) {
         console.error(`[auto-sell] failed "${title}": ${err.message}`);
@@ -783,6 +796,84 @@ async function autoTakeProfit() {
   return entries;
 }
 
+
+// ── Daily P&L computation ─────────────────────────────────
+
+async function computeDailyPnlSummary() {
+  const address = await getWalletAddress();
+  if (!address) return null;
+
+  try {
+    const { getDailyPnl, updateUnrealizedPnl } = await import("./lib/state.mjs");
+
+    // Fetch live positions for unrealized P&L
+    const res = await fetch(
+      `${DATA_API}/positions?user=${address}`,
+      { signal: AbortSignal.timeout(10_000) },
+    );
+    if (!res.ok) return null;
+    const positions = await res.json();
+    if (!Array.isArray(positions)) return null;
+
+    let totalCost = 0;
+    let totalValue = 0;
+    let unrealizedPnl = 0;
+    let posCount = 0;
+
+    for (const p of positions) {
+      const size = parseFloat(p.size || 0);
+      const curPrice = parseFloat(p.curPrice || 0);
+      const avgPrice = parseFloat(p.avgPrice || 0);
+      if (size <= 0) continue;
+
+      const posValue = size * curPrice;
+      if (posValue < 0.50) continue; // skip dust
+
+      const posCost = size * avgPrice;
+      totalCost += posCost;
+      totalValue += posValue;
+      unrealizedPnl += posValue - posCost;
+      posCount++;
+    }
+
+    // Fetch USDC balance
+    let usdcBalance = 0;
+    try {
+      const balRes = await fetch(`${DATA_API}/balance?user=${address}`, { signal: AbortSignal.timeout(5_000) });
+      if (balRes.ok) {
+        const balData = await balRes.json();
+        usdcBalance = parseFloat(balData?.balance || balData?.usdc || 0);
+      }
+    } catch {}
+
+    const portfolioValue = usdcBalance + totalValue;
+
+    // Update state with unrealized snapshot
+    updateUnrealizedPnl(unrealizedPnl, portfolioValue);
+
+    // Get realized P&L from today's closed trades
+    const daily = getDailyPnl();
+    const totalPnl = daily.realizedPnl + unrealizedPnl;
+    const pnlPct = portfolioValue > 0 ? (totalPnl / (portfolioValue - totalPnl)) * 100 : 0;
+
+    return {
+      date: daily.date,
+      realizedPnl: daily.realizedPnl,
+      realizedCount: daily.realizedCount,
+      unrealizedPnl,
+      totalPnl,
+      pnlPct,
+      portfolioValue,
+      usdcBalance,
+      positionsValue: totalValue,
+      positionsCost: totalCost,
+      posCount,
+    };
+  } catch (err) {
+    console.error(`[pnl] error computing daily P&L: ${err.message}`);
+    return null;
+  }
+}
 
 // ── Scan cycle ───────────────────────────────────────────
 
@@ -855,11 +946,27 @@ async function runScanCycle() {
     console.error(`[scanner] auto-sell error: ${err.message}`);
   }
 
-  // Push to GitHub (scanner + auto-trade + auto-sell entries combined — single write to avoid SHA race)
+  // Daily P&L summary — compute and add to dashboard entries
+  let pnlEntries = [];
+  try {
+    const pnl = await computeDailyPnlSummary();
+    if (pnl) {
+      const sign = pnl.totalPnl >= 0 ? "+" : "";
+      const target2pct = pnl.portfolioValue * 0.02;
+      const progressPct = target2pct > 0 ? ((pnl.totalPnl / target2pct) * 100).toFixed(0) : "0";
+      const pnlMsg = `Daily P&L: ${sign}$${pnl.totalPnl.toFixed(2)} (${sign}${pnl.pnlPct.toFixed(1)}%) | Realized: ${sign}$${pnl.realizedPnl.toFixed(2)} (${pnl.realizedCount} trades) | Unrealized: ${pnl.unrealizedPnl >= 0 ? "+" : ""}$${pnl.unrealizedPnl.toFixed(2)} (${pnl.posCount} positions) | Portfolio: $${pnl.portfolioValue.toFixed(2)} (USDC: $${pnl.usdcBalance.toFixed(2)} + positions: $${pnl.positionsValue.toFixed(2)}) | 2% target: ${progressPct}%`;
+      pnlEntries.push({ timestamp: new Date().toISOString(), type: "pnl", message: pnlMsg });
+      console.log(`[scanner] ${pnlMsg}`);
+    }
+  } catch (err) {
+    console.error(`[scanner] P&L error: ${err.message}`);
+  }
+
+  // Push to GitHub (scanner + auto-trade + auto-sell + P&L entries combined — single write to avoid SHA race)
   try {
     const { sha, entries: existing } = await getExistingJsonl(token, repo);
     const parsedNew = newEntries.map((e) => typeof e === "string" ? JSON.parse(e) : e);
-    const combined = [...existing, ...autoTradeEntries, ...profitEntries, ...parsedNew];
+    const combined = [...existing, ...autoTradeEntries, ...profitEntries, ...pnlEntries, ...parsedNew];
     const trimmed = combined.slice(-MAX_ENTRIES);
     await pushJsonl(token, repo, sha, trimmed);
     console.log(`[scanner] pushed ${newEntries.length} scan + ${autoTradeEntries.length} trade entries (total: ${trimmed.length})`);

@@ -29,7 +29,7 @@ const MIN_LIQUIDITY = 50_000;   // $50K minimum liquidity
 const MIN_LIQUIDITY_WEATHER = 10_000; // $10K for weather markets
 const MAX_TRADES_PER_INVOCATION = 3;
 const MAX_OPEN_POSITIONS = 10;  // Never hold more than 10 positions at once
-const MIN_TRADE = 50;           // $50 minimum
+const MIN_TRADE = 25;           // $25 minimum — lower floor allows more frequent smaller bets
 const MAX_SPREAD_RATIO = 0.15;  // Skip trades where spread > 15% of entry price
 const DUST_VALUE_THRESHOLD = 0.50; // Positions worth < $0.50 are dust — don't count toward cap
 const DATA_API = "https://data-api.polymarket.com";
@@ -118,7 +118,7 @@ function sizePosition(score, signalType, dailySpend, maxDay) {
 }
 
 // Conviction-based sizing after palpha enrichment
-// Uses alpha, confidence, Grok confidence, and portfolio balance
+// Sized to target ~2% daily portfolio return with 3-6 trades/day
 function sizeByConviction(opp, portfolioBalance) {
   const alpha = opp._palphaAlpha || 0;
   const conf = opp._palphaConf || 0.3;
@@ -130,21 +130,21 @@ function sizeByConviction(opp, portfolioBalance) {
   const edge = Math.min(alpha, 0.40); // cap edge at 40%
   const kellyFraction = edge * conf;
 
-  // Base allocation as % of portfolio
-  // ACTIONABLE + high grok: up to 8% of portfolio
-  // ACTIONABLE + medium grok: up to 5%
-  // NOTABLE: up to 3%
+  // Base allocation as % of portfolio — aggressive enough for 2% daily target
+  // ACTIONABLE + high grok: up to 12% of portfolio
+  // ACTIONABLE + medium grok: up to 8%
+  // NOTABLE: up to 5%
   let maxPct;
-  if (rec === "ACTIONABLE" && grokConf === "high") maxPct = 0.08;
-  else if (rec === "ACTIONABLE") maxPct = 0.05;
-  else maxPct = 0.03;
+  if (rec === "ACTIONABLE" && grokConf === "high") maxPct = 0.12;
+  else if (rec === "ACTIONABLE") maxPct = 0.08;
+  else maxPct = 0.05;
 
   // Scale by kelly fraction (higher edge+conf = larger bet)
   let size = portfolioBalance * Math.min(kellyFraction, maxPct);
 
   // Floor and ceiling
   size = Math.max(MIN_TRADE, size);
-  size = Math.min(size, portfolioBalance * 0.10); // never more than 10% of portfolio on one trade
+  size = Math.min(size, portfolioBalance * 0.15); // max 15% of portfolio on one trade
 
   return Math.floor(size);
 }
@@ -290,6 +290,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
   }
 
   // Enrich a single market with its own timeout.
+  // Two-phase: cheap sources first → quick score → only call Grok if promising.
   // Returns result even on timeout (marks as unenriched, keeps raw score).
   async function enrichOne(opp) {
     const started = Date.now();
@@ -301,9 +302,37 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       const { category } = categorize(market.question || "");
       const enrichedMarket = { ...market, _category: category, _signalContext: opp._signalContext || null };
 
-      // 2. Match + fetch alt data (Grok needs 15-25s for x_search + web_search)
+      // 2. PHASE 1: Fetch cheap/fast alt data WITHOUT Grok
       const matchResult = match(enrichedMarket);
-      const altData = await fetchAltData(enrichedMarket, matchResult);
+      const SKIP_GROK = new Set(["grok"]);
+      const cheapAltData = await fetchAltData(enrichedMarket, matchResult, { skipSources: SKIP_GROK });
+
+      // Pre-filter: check if cheap sources returned ANY useful data
+      // If zero cheap sources responded AND scanner score is low, skip Grok
+      // (no alt data to cross-reference = Grok operating blind on a weak signal)
+      const cheapSources = Object.keys(cheapAltData).filter(k => cheapAltData[k] != null);
+      const hasMetaculus = cheapAltData.metaculus != null;
+      const hasDomainData = cheapAltData.nws != null || cheapAltData.ensemble != null
+        || cheapAltData.coingecko != null || cheapAltData.fred != null
+        || cheapAltData.montecarlo?.mcImplied != null;
+
+      if (cheapSources.length === 0 && opp.score < 5) {
+        const q = (market.question || "").slice(0, 60);
+        entries.push(`[pre-filter] "${q}" — zero cheap sources responded + weak scanner signal (score=${opp.score.toFixed(1)}), skipping Grok`);
+        return { opp, enriched: true, vetoed: true, reason: "pre-filter: no alt data + weak signal — Grok skipped" };
+      }
+
+      // If only metaculus matched (weak signal) and scanner score is low, also skip
+      if (!hasDomainData && !hasMetaculus && cheapSources.length <= 1 && opp.score < 3) {
+        const q = (market.question || "").slice(0, 60);
+        entries.push(`[pre-filter] "${q}" — minimal alt data (${cheapSources.join(",") || "none"}) + very weak signal, skipping Grok`);
+        return { opp, enriched: true, vetoed: true, reason: "pre-filter: minimal alt data + very weak signal — Grok skipped" };
+      }
+
+      // 3. PHASE 2: Market looks promising — now call Grok only
+      const grokOnly = { sources: ["grok"], params: matchResult.params };
+      const grokData = await fetchAltData(enrichedMarket, grokOnly);
+      const altData = { ...cheapAltData, ...grokData };
 
       // Log which sources actually returned data
       const gotSources = Object.keys(altData).filter(k => altData[k] != null);
@@ -313,7 +342,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
         entries.push(`[data] "${(market.question || "").slice(0, 50)}" — sources: ${gotSources.join(", ")}`);
       }
 
-      // 3. Score divergence
+      // 4. Full score with Grok
       const scoreResult = score(enrichedMarket, altData, matchResult.params);
       const rec = recommendation(scoreResult.alpha, scoreResult.confidence);
 
