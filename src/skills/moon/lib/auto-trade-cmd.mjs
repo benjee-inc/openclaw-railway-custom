@@ -342,15 +342,12 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
         const mktPct = ((market.prices?.[0] || 0) * 100).toFixed(1);
         const srcs = scoreResult.sources || [];
 
-        // Log what we found out about this market
-        if (altData?.grok?.probability != null) {
+        // Log Grok's reasoning
+        if (altData?.grok) {
           const g = altData.grok;
-          const grokPct = (g.probability * 100).toFixed(0);
-          entries.push(`I think "${q}" is ${grokPct}% likely (market says ${mktPct}%) — ${(g.reasoning || "").slice(0, 250)}`);
-        } else if (srcs.length === 0) {
-          entries.push(`Looked at "${q}" but couldn't get data (Grok may have timed out)`);
+          entries.push(`"${q}" — ${(g.reasoning || "No clear signal").slice(0, 300)}`);
         } else {
-          entries.push(`Looked at "${q}" (market @ ${mktPct}%) but didn't find enough edge to trade`);
+          entries.push(`"${q}" — couldn't get a read on this one`);
         }
 
         return { opp, enriched: true, vetoed: true, reason: `not enough edge` };
@@ -372,16 +369,14 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       const aligned = (scannerBuyingYes && palphaFavorsYes) || (!scannerBuyingYes && !palphaFavorsYes);
       const q = (market.question || "").slice(0, 60);
 
-      // Grok reasoning (the main thing we want to see)
-      if (altData?.grok?.probability != null) {
-        const g = altData.grok;
-        const grokPct = (g.probability * 100).toFixed(0);
-        entries.push(`I think "${q}" is ${grokPct}% likely (market says ${mktPct}%) — ${(g.reasoning || "").slice(0, 250)}`);
+      // Grok's take
+      if (altData?.grok) {
+        entries.push(`"${q}" — ${(altData.grok.reasoning || "").slice(0, 300)}`);
       }
 
-      entries.push(`${rec} "${q}" — market ${mktPct}%, data says ${implied}, betting ${opp.outcome.toUpperCase()}${aligned ? "" : " (AGAINST data direction)"} (${elapsed}s)`);
+      entries.push(`Buying ${opp.outcome.toUpperCase()} on "${q}" — market @ ${mktPct}%${aligned ? "" : " (contrarian bet)"}`);
       if (scoreResult.detail) {
-        entries.push(`  Why: ${scoreResult.detail.trim().slice(0, 300)}`);
+        entries.push(`  ${scoreResult.detail.trim().slice(0, 300)}`);
       }
       return { opp, enriched: true, vetoed: false };
     } catch (err) {
