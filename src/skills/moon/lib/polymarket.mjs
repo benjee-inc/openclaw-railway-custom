@@ -316,7 +316,7 @@ export async function redeemPosition(conditionId, negRisk = false, tokenIds = []
     };
     const tx = await adapter.redeemPositions(conditionId, amounts, gasOpts);
     const receipt = await tx.wait();
-    return { success: true, txHash: receipt.hash, gasUsed: receipt.gasUsed?.toString() };
+    return { success: true, txHash: receipt.hash ?? receipt.transactionHash ?? tx.hash, gasUsed: receipt.gasUsed?.toString() };
   } else {
     const ctf = new ethers.Contract(CTF_ADDRESS, CTF_ABI, wallet);
     const feeData = await provider.getFeeData();
@@ -338,7 +338,7 @@ export async function redeemPosition(conditionId, negRisk = false, tokenIds = []
       gasOpts,
     );
     const receipt = await tx.wait();
-    return { success: true, txHash: receipt.hash, gasUsed: receipt.gasUsed?.toString() };
+    return { success: true, txHash: receipt.hash ?? receipt.transactionHash ?? tx.hash, gasUsed: receipt.gasUsed?.toString() };
   }
 }
 
