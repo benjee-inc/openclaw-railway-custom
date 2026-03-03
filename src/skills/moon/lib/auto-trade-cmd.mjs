@@ -470,11 +470,11 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
 
         // Log alt data detail + Grok's full analysis
         if (scoreResult.detail) {
-          entries.push(`[alt] "${q}" — ${scoreResult.detail.trim().slice(0, 400)}`);
+          entries.push(`[alt] "${q}" — ${scoreResult.detail.trim().slice(0, 800)}`);
         }
         if (altData?.grok) {
           const g = altData.grok;
-          entries.push(`[grok] "${q}" → ${(g.probability * 100).toFixed(0)}% (${g.confidence}) — ${(g.reasoning || "No clear signal").slice(0, 400)}`);
+          entries.push(`[grok] "${q}" → ${(g.probability * 100).toFixed(0)}% (${g.confidence}) — ${(g.reasoning || "No clear signal").slice(0, 800)}`);
           if (g.keySignals?.length > 0) entries.push(`[grok] signals: ${g.keySignals.join(" | ")}`);
           if (g.marketComparison) entries.push(`[grok] vs market: ${g.marketComparison}`);
         } else {
@@ -519,14 +519,14 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       // Grok's full analysis
       if (altData?.grok) {
         const g = altData.grok;
-        entries.push(`[grok] "${q}" → ${(g.probability * 100).toFixed(0)}% (${g.confidence}) — ${(g.reasoning || "").slice(0, 400)}`);
+        entries.push(`[grok] "${q}" → ${(g.probability * 100).toFixed(0)}% (${g.confidence}) — ${(g.reasoning || "").slice(0, 800)}`);
         if (g.keySignals?.length > 0) entries.push(`[grok] signals: ${g.keySignals.join(" | ")}`);
         if (g.marketComparison) entries.push(`[grok] vs market: ${g.marketComparison}`);
       }
 
       entries.push(`Buying ${opp.outcome.toUpperCase()} on "${q}" — market @ ${mktPct}%${aligned ? "" : " (contrarian bet)"}`);
       if (scoreResult.detail) {
-        entries.push(`[alt] ${scoreResult.detail.trim().slice(0, 400)}`);
+        entries.push(`[alt] ${scoreResult.detail.trim().slice(0, 800)}`);
       }
       return { opp, enriched: true, vetoed: false };
     } catch (err) {
