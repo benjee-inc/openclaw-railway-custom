@@ -26,7 +26,7 @@ import { fetchOrderBook, analyzeDepth } from "../../polymarket-alpha/lib/depth.m
 // ── Constants ────────────────────────────────────────────
 
 const MAX_PER_DAY = Infinity;   // No daily limit (circuit breaker handles daily risk)
-const MIN_LIQUIDITY = 200_000;  // $200K minimum liquidity (event-level, not per-candidate)
+const MIN_LIQUIDITY = 100_000;  // $100K minimum liquidity (event-level, not per-candidate)
 const MIN_LIQUIDITY_WEATHER = 50_000; // $50K for weather markets
 const MAX_TRADES_PER_INVOCATION = 1; // One trade per cycle — sniper mode
 const MAX_OPEN_POSITIONS = 3;   // Max 3 concentrated positions
@@ -156,7 +156,7 @@ function getMinLiquidity(question) {
 
 const MIN_PRICE = 0.35; // Don't bet on outliers below 35% odds — low-price markets have devastating spreads
 const MAX_PRICE = 0.85; // Don't bet on near-certainties — tiny upside, full downside
-const MAX_DAYS_TO_RESOLUTION = 30; // Never trade markets resolving > 30 days out (longshot trap)
+const MAX_DAYS_TO_RESOLUTION = 90; // Allow medium-term markets up to 90 days
 
 // Toxic categories — longshots and illiquid geopolitical markets that bleed forever
 const TOXIC_KEYWORDS = [
@@ -207,7 +207,34 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
     });
   }
 
-  // 2. Hourly momentum — only top 3, require sustained move
+  // 2. Volume spikes — MUST be verified by Grok against real news
+  // Whale manipulation often shows as volume spikes without news backing.
+  // We flag these with _requiresNewsVerification so Grok specifically checks
+  // if real-world events justify the volume, not just whale activity.
+  for (const m of (signals.volumeSpikes || []).slice(0, 5)) {
+    if (!m.conditionId) continue;
+    const market = marketMap.get(m.conditionId);
+    if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
+    if (m.price > MAX_PRICE || m.price < MIN_PRICE) continue;
+    if (m.ratio < 0.08) continue; // 8%+ of lifetime volume in 24h
+    if (isSportsMarket(m.q || market.question || "")) continue;
+
+    // Direction: if price moved up during spike → buy yes, else buy no
+    const outcome = (m.change1h != null && m.change1h > 0) ? "yes" : "no";
+    const amount = sizePosition(m.score, "volume_spike", dailySpend, maxDay);
+    if (amount < MIN_TRADE || dailySpend + amount > maxDay) continue;
+
+    opportunities.push({
+      conditionId: m.conditionId, outcome, amount,
+      reason: `Volume spike: $${m.volume24h >= 1000 ? (m.volume24h / 1000).toFixed(1) + "K" : m.volume24h.toFixed(0)} in 24h (${(m.ratio * 100).toFixed(0)}% of lifetime)`,
+      signalType: "volume_spike", score: m.score * 1.3,
+      question: m.q, liquidity: market.liquidity,
+      _requiresNewsVerification: true,
+      _signalContext: `VOLUME SPIKE detected — $${m.volume24h.toFixed(0)} traded in 24h, which is ${(m.ratio * 100).toFixed(0)}% of the market's entire lifetime volume. Current price: ${(m.price * 100).toFixed(1)}%. CRITICAL: You MUST determine if this volume spike is driven by real news/events or is whale manipulation. If you cannot find specific recent news justifying this volume, classify as NOISE. Only classify as ACTIONABLE if you find concrete news articles or events from the last 48 hours that directly relate to this market.`,
+    });
+  }
+
+  // 3. Hourly momentum — only top 3, require sustained move
   for (const m of (signals.movers1h || []).slice(0, 3)) {
     if (!m.conditionId) continue;
     const market = marketMap.get(m.conditionId);
@@ -225,7 +252,8 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
       reason: `Hourly momentum: ${m.dir}${(Math.abs(m.change1h) * 100).toFixed(1)}% in 1h, now ${(m.price * 100).toFixed(1)}%`,
       signalType: "momentum", score: m.score * 1.5,
       question: m.q, liquidity: market.liquidity,
-      _signalContext: `Momentum signal — price moved ${m.dir}${(Math.abs(m.change1h) * 100).toFixed(1)}% in the last hour, now at ${(m.price * 100).toFixed(1)}%.`,
+      _requiresNewsVerification: true,
+      _signalContext: `Momentum signal — price moved ${m.dir}${(Math.abs(m.change1h) * 100).toFixed(1)}% in the last hour, now at ${(m.price * 100).toFixed(1)}%. This could be driven by real news or by whale manipulation. Search for recent news (last 48h) about this topic. Only classify as ACTIONABLE if you find concrete news/events driving this price move. If the move has no clear news catalyst, classify as NOISE.`,
     });
   }
 
@@ -368,7 +396,9 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       const DOMAIN_SOURCES = new Set(["nws", "ensemble", "coingecko", "fred", "metaculus", "coinglass", "opensky", "arxiv", "fear_greed"]);
       const domainHits = Object.keys(cheapAltData).filter(k => cheapAltData[k] != null && DOMAIN_SOURCES.has(k));
 
-      if (domainHits.length === 0 && opp.score < 8) {
+      // Volume spikes ALWAYS go to Grok — Grok must verify if news backs the volume.
+      // Other signal types can be pre-filtered if no domain data.
+      if (domainHits.length === 0 && opp.score < 8 && !opp._requiresNewsVerification) {
         const q = (market.question || "").slice(0, 60);
         entries.push(`[pre-filter] "${q}" — no domain data (score=${opp.score.toFixed(1)}), skipping Grok`);
         return { opp, enriched: true, vetoed: true, reason: "pre-filter: no domain-specific data — Grok skipped" };
