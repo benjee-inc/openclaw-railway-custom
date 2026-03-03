@@ -156,6 +156,13 @@ function getMinLiquidity(question) {
 
 const MIN_PRICE = 0.35; // Don't bet on outliers below 35% odds — low-price markets have devastating spreads
 const MAX_PRICE = 0.85; // Don't bet on near-certainties — tiny upside, full downside
+const MAX_DAYS_TO_RESOLUTION = 30; // Never trade markets resolving > 30 days out (longshot trap)
+
+// Toxic categories — longshots and illiquid geopolitical markets that bleed forever
+const TOXIC_KEYWORDS = [
+  "2028", "2029", "2030", "presidential nomination", "supreme leader",
+  "khameinei", "khamenei", "iran nuclear", "raimondo",
+];
 
 function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
   const opportunities = [];
@@ -327,6 +334,24 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
     try {
       const market = mktMap.get(opp.conditionId);
       if (!market) return { opp, enriched: false };
+
+      // 0a. Toxic keyword filter — longshots and illiquid geopolitical traps
+      const qLower = (market.question || "").toLowerCase();
+      const slugLower = (market.eventSlug || "").toLowerCase();
+      const isToxic = TOXIC_KEYWORDS.some(kw => qLower.includes(kw) || slugLower.includes(kw));
+      if (isToxic) {
+        entries.push(`[toxic] "${(market.question || "").slice(0, 60)}" — matches blacklist keyword`);
+        return { opp, enriched: true, vetoed: true, reason: "toxic category blacklist" };
+      }
+
+      // 0b. Resolution date filter — never trade markets > 30 days out
+      if (market.endDate) {
+        const daysOut = Math.max(0, (new Date(market.endDate).getTime() - Date.now()) / (24 * 3600_000));
+        if (daysOut > MAX_DAYS_TO_RESOLUTION) {
+          entries.push(`[longshot] "${(market.question || "").slice(0, 60)}" — resolves in ${daysOut.toFixed(0)} days (max ${MAX_DAYS_TO_RESOLUTION})`);
+          return { opp, enriched: true, vetoed: true, reason: `resolves in ${daysOut.toFixed(0)} days (max ${MAX_DAYS_TO_RESOLUTION})` };
+        }
+      }
 
       // 1. Categorize + attach signal context for Grok
       const { category } = categorize(market.question || "");
