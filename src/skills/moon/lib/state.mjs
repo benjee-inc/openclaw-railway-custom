@@ -287,6 +287,105 @@ export function recordRealizedPnl(amount) {
   saveState(state);
 }
 
+// ─── News → Market Memory ────────────────────────────────────────────────────
+// Records how news events affected market prices so Grok can learn patterns.
+// Stored as separate JSONL file to keep state.json lean.
+
+const MAX_NEWS_MEMORIES = 100;
+
+function newsMemoryPath() {
+  return join(getStateDir(), "news-memory.json");
+}
+
+function loadNewsMemory() {
+  try {
+    return JSON.parse(readFileSync(newsMemoryPath(), "utf-8"));
+  } catch { return []; }
+}
+
+function saveNewsMemory(memories) {
+  const dir = getStateDir();
+  mkdirSync(dir, { recursive: true });
+  const p = newsMemoryPath();
+  const tmp = p + ".tmp";
+  writeFileSync(tmp, JSON.stringify(memories.slice(-MAX_NEWS_MEMORIES)), "utf-8");
+  renameSync(tmp, p);
+}
+
+// Record a news→market observation when we first detect a news match
+export function recordNewsObservation(obs) {
+  const memories = loadNewsMemory();
+  // Dedup by conditionId + headline
+  const key = `${obs.conditionId}:${(obs.headline || "").slice(0, 40)}`;
+  if (memories.some(m => `${m.conditionId}:${(m.headline || "").slice(0, 40)}` === key)) return;
+  memories.push({
+    ts: new Date().toISOString(),
+    conditionId: obs.conditionId,
+    question: (obs.question || "").slice(0, 80),
+    headline: (obs.headline || "").slice(0, 100),
+    articleCount: obs.articleCount || 0,
+    tone: obs.tone || 0,
+    priceAtNews: obs.priceAtNews || 0,
+    priceLater: null, // filled in on follow-up cycles
+    priceChange: null,
+    traded: obs.traded || false,
+    tradePnl: null,
+    category: obs.category || "unknown",
+  });
+  saveNewsMemory(memories);
+}
+
+// Update prices for past observations (call each cycle)
+export function updateNewsObservations(marketPrices) {
+  // marketPrices: Map<conditionId, currentPrice>
+  const memories = loadNewsMemory();
+  let changed = false;
+  const now = Date.now();
+  for (const m of memories) {
+    if (m.priceLater != null) continue; // already resolved
+    const age = now - new Date(m.ts).getTime();
+    if (age < 4 * 3600_000) continue; // wait 4h before measuring reaction
+    const curPrice = marketPrices.get(m.conditionId);
+    if (curPrice != null) {
+      m.priceLater = curPrice;
+      m.priceChange = curPrice - m.priceAtNews;
+      changed = true;
+    }
+  }
+  if (changed) saveNewsMemory(memories);
+}
+
+// Get formatted memory string for Grok
+export function getNewsMemoryForGrok() {
+  const memories = loadNewsMemory();
+  const resolved = memories.filter(m => m.priceLater != null);
+  if (resolved.length === 0) return "";
+
+  const lines = ["\nNEWS→MARKET REACTION HISTORY (how past news moved prices):"];
+
+  // Compute category stats
+  const cats = {};
+  for (const m of resolved) {
+    const cat = m.category || "unknown";
+    if (!cats[cat]) cats[cat] = { moves: [], count: 0 };
+    cats[cat].count++;
+    cats[cat].moves.push(m.priceChange);
+  }
+  for (const [cat, data] of Object.entries(cats)) {
+    const avg = data.moves.reduce((s, v) => s + v, 0) / data.moves.length;
+    const posCount = data.moves.filter(v => v > 0.01).length;
+    lines.push(`${cat}: ${data.count} events, avg move ${avg > 0 ? "+" : ""}${(avg * 100).toFixed(1)}pp, ${posCount}/${data.count} moved up`);
+  }
+
+  // Show recent examples (last 10)
+  lines.push("\nRecent examples:");
+  for (const m of resolved.slice(-10)) {
+    const dir = m.priceChange >= 0 ? "+" : "";
+    lines.push(`- "${m.headline?.slice(0, 50)}" → "${m.question?.slice(0, 40)}" | was ${(m.priceAtNews * 100).toFixed(0)}% → ${(m.priceLater * 100).toFixed(0)}% (${dir}${(m.priceChange * 100).toFixed(1)}pp)${m.traded ? " [TRADED]" : ""}`);
+  }
+  return lines.join("\n");
+}
+
 export function updateUnrealizedPnl(unrealizedPnl, portfolioValue) {
   const state = loadState();
   const today = new Date().toISOString().slice(0, 10);

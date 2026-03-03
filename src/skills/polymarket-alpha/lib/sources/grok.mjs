@@ -70,7 +70,14 @@ async function buildGrokMemory() {
     console.error(`[grok] memory build error: ${err.message}`);
   }
 
-  _memoryCache = lines.length > 0 ? "\n\nTRADING CONTEXT (your past performance and current state):\n" + lines.join("\n") : "";
+  // News→market reaction history
+  try {
+    const { getNewsMemoryForGrok } = await import("../../../moon/lib/state.mjs");
+    const newsMemory = getNewsMemoryForGrok();
+    if (newsMemory) lines.push(newsMemory);
+  } catch {}
+
+  _memoryCache = lines.length > 0 ? "\n\nTRADING CONTEXT (your past performance, current state, and how news moved markets):\n" + lines.join("\n") : "";
   _memoryCacheTs = Date.now();
   return _memoryCache;
 }

@@ -1101,6 +1101,30 @@ async function runScanCycle() {
       return [];
     });
 
+    // Record news→market observations + update past observations with current prices
+    try {
+      const { recordNewsObservation, updateNewsObservations } = await import("./lib/state.mjs");
+      const { categorize } = await import("../polymarket-alpha/lib/matcher.mjs");
+      for (const nm of newsMatches) {
+        recordNewsObservation({
+          conditionId: nm.conditionId,
+          question: nm.q,
+          headline: nm.headlines?.[0] || "",
+          articleCount: nm.articleCount,
+          tone: nm.avgTone,
+          priceAtNews: nm.price,
+          category: categorize(nm.q || "").category,
+        });
+      }
+      const priceMap = new Map();
+      for (const m of markets) {
+        if (m.conditionId && m.prices?.[0]) priceMap.set(m.conditionId, m.prices[0]);
+      }
+      updateNewsObservations(priceMap);
+    } catch (err) {
+      console.error(`[scanner] news memory error: ${err.message}`);
+    }
+
     newEntries = buildEntries(markets, signals, tradeFlows, midShifts, newsMatches);
 
     // Write structured signals to disk for moon auto-trade
