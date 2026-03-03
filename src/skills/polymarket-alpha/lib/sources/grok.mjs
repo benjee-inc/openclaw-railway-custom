@@ -5,6 +5,76 @@
 import { XAI_API, TTL } from "../constants.mjs";
 import * as cache from "../cache.mjs";
 
+// ── Persistent memory for Grok ────────────────────────────
+// Builds context from trade history, positions, and performance so Grok
+// can learn from past decisions and avoid repeating mistakes.
+
+let _memoryCache = null;
+let _memoryCacheTs = 0;
+const MEMORY_TTL = 300_000; // refresh every 5 min
+
+async function buildGrokMemory() {
+  if (_memoryCache && Date.now() - _memoryCacheTs < MEMORY_TTL) return _memoryCache;
+  const lines = [];
+  try {
+    const DATA_API = "https://data-api.polymarket.com";
+    const addr = process.env.POLYMARKET_WALLET_ADDRESS;
+    if (!addr) return "";
+
+    // Current positions
+    const posRes = await fetch(`${DATA_API}/positions?user=${addr}`, { signal: AbortSignal.timeout(8_000) });
+    if (posRes.ok) {
+      const positions = await posRes.json();
+      if (Array.isArray(positions)) {
+        const active = positions.filter(p => parseFloat(p.size || 0) > 0 && parseFloat(p.size || 0) * parseFloat(p.curPrice || 0) >= 0.50);
+        if (active.length > 0) {
+          lines.push(`CURRENT POSITIONS (${active.length}):`);
+          for (const p of active.slice(0, 8)) {
+            const pnl = parseFloat(p.percentPnl || 0);
+            lines.push(`- "${(p.title || "").slice(0, 60)}" ${(p.outcome || "").toUpperCase()} | entry ${(parseFloat(p.avgPrice || 0) * 100).toFixed(1)}% | now ${(parseFloat(p.curPrice || 0) * 100).toFixed(1)}% | P&L ${pnl >= 0 ? "+" : ""}${pnl.toFixed(0)}%`);
+          }
+        }
+      }
+    }
+
+    // Recent trade history (last 20 trades)
+    const actRes = await fetch(`${DATA_API}/activity?user=${addr}&limit=20`, { signal: AbortSignal.timeout(8_000) });
+    if (actRes.ok) {
+      const activity = await actRes.json();
+      if (Array.isArray(activity) && activity.length > 0) {
+        let wins = 0, losses = 0, totalPnl = 0;
+        const trades = [];
+        for (const a of activity) {
+          const pnl = parseFloat(a.cashPnl || a.pnl || 0);
+          if (a.type === "SELL" || a.type === "sell") {
+            if (pnl > 0) wins++; else losses++;
+            totalPnl += pnl;
+            trades.push(`${pnl >= 0 ? "WIN" : "LOSS"} $${Math.abs(pnl).toFixed(2)} "${(a.title || "").slice(0, 50)}"`);
+          }
+        }
+        if (wins + losses > 0) {
+          lines.push(`\nTRADE HISTORY: ${wins}W/${losses}L (${((wins / (wins + losses)) * 100).toFixed(0)}% win rate), net P&L: $${totalPnl.toFixed(2)}`);
+          for (const t of trades.slice(0, 5)) lines.push(`- ${t}`);
+        }
+      }
+    }
+
+    // Portfolio balance
+    const balRes = await fetch(`${DATA_API}/balance?user=${addr}`, { signal: AbortSignal.timeout(5_000) });
+    if (balRes.ok) {
+      const bal = await balRes.json();
+      const usdc = parseFloat(bal?.balance || bal?.usdc || 0);
+      if (usdc >= 0) lines.push(`\nAVAILABLE USDC: $${usdc.toFixed(2)}`);
+    }
+  } catch (err) {
+    console.error(`[grok] memory build error: ${err.message}`);
+  }
+
+  _memoryCache = lines.length > 0 ? "\n\nTRADING CONTEXT (your past performance and current state):\n" + lines.join("\n") : "";
+  _memoryCacheTs = Date.now();
+  return _memoryCache;
+}
+
 /**
  * Analyze a prediction market question using Grok's web_search + x_search.
  * Returns a probability estimate with confidence and reasoning.
@@ -19,6 +89,9 @@ export async function analyzeMarket(question, category, marketPrice, signalConte
   const cacheKey = `grok:${question.slice(0, 80)}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
+
+  // Build memory context (cached, refreshes every 5 min)
+  const memory = await buildGrokMemory().catch(() => "");
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -53,7 +126,8 @@ export async function analyzeMarket(question, category, marketPrice, signalConte
                 '{"probability": 0.XX, "confidence_interval": [0.XX, 0.XX], "confidence": "high"|"medium"|"low", ' +
                 '"reasoning": "3-6 sentences", "key_signals": ["signal1", "signal2", "signal3"], ' +
                 '"major_risks": ["risk1", "risk2"], "hold_time": "Xh"|"Xd"|"Xm", ' +
-                '"market_comparison": "How and why your view differs from the market price"}',
+                '"market_comparison": "How and why your view differs from the market price"}' +
+                memory,
             },
             {
               role: "user",
@@ -118,7 +192,7 @@ export async function analyzeMarket(question, category, marketPrice, signalConte
       const result = {
         probability: Math.max(0, Math.min(1, Number(parsed.probability))),
         confidence: ["high", "medium", "low"].includes(parsed.confidence) ? parsed.confidence : "low",
-        reasoning: String(parsed.reasoning || "").slice(0, 400),
+        reasoning: String(parsed.reasoning || "").slice(0, 800),
         keySignals: Array.isArray(parsed.key_signals) ? parsed.key_signals.slice(0, 6) : [],
         marketComparison: String(parsed.market_comparison || "").slice(0, 200),
         majorCatalysts: Array.isArray(parsed.major_catalysts) ? parsed.major_catalysts.slice(0, 4) : [],
