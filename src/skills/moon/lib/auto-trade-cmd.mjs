@@ -28,13 +28,13 @@ import { fetchOrderBook, analyzeDepth } from "../../polymarket-alpha/lib/depth.m
 const MAX_PER_DAY = Infinity;   // No daily limit (circuit breaker handles daily risk)
 const MIN_LIQUIDITY = 200_000;  // $200K minimum liquidity (event-level, not per-candidate)
 const MIN_LIQUIDITY_WEATHER = 50_000; // $50K for weather markets
-const MAX_TRADES_PER_INVOCATION = 2; // Down from 3 — fewer, higher-quality trades
-const MAX_OPEN_POSITIONS = 5;   // Down from 10 — concentrated portfolio
-const MIN_TRADE = 10;           // $10 minimum — smaller bets with 2% risk model
+const MAX_TRADES_PER_INVOCATION = 1; // One trade per cycle — sniper mode
+const MAX_OPEN_POSITIONS = 3;   // Max 3 concentrated positions
+const MIN_TRADE = 25;           // $25 minimum
 const MAX_SPREAD_RATIO = 0.08;  // Down from 15% — tighter spread filter
 const DUST_VALUE_THRESHOLD = 0.50; // Positions worth < $0.50 are dust — don't count toward cap
 const DAILY_LOSS_CIRCUIT_BREAKER = -0.03; // Pause trading if daily P&L < -3% of portfolio
-const MIN_GROK_EDGE = 0.12;    // Require 12%+ edge between Grok probability and market price
+const MIN_GROK_EDGE = 0.15;    // Require 15%+ edge between Grok probability and market price
 const DATA_API = "https://data-api.polymarket.com";
 const DEFAULT_STALE_MS = 600_000; // 10 minutes
 const DEFAULT_REPO = "benjee-inc/polymarket-arb-dashboard";
@@ -120,24 +120,29 @@ function sizePosition(score, signalType, dailySpend, maxDay) {
   return Math.max(MIN_TRADE, Math.floor(Math.min(size, maxDay - dailySpend)));
 }
 
-// Conviction-based sizing after palpha enrichment
-// Max 2% of portfolio at risk per trade — conservative Kelly
+// Conviction-based sizing — concentrated bets, ACTIONABLE+high only gets real size
 function sizeByConviction(opp, portfolioBalance) {
   const rec = opp._palphaRec || "NOTABLE";
   const grokConf = opp._grokConf || "low";
+  const grokEdge = opp._grokEdge || 0;
 
-  // 2% of portfolio is the max risk per trade
-  const baseRisk = 0.02;
+  // Only ACTIONABLE+high gets a real position
+  // Scale size by edge magnitude — bigger edge = bigger bet
   let sizePct;
-  if (rec === "ACTIONABLE" && grokConf === "high") sizePct = baseRisk * 1.0;   // 2%
-  else if (rec === "ACTIONABLE") sizePct = baseRisk * 0.75;                    // 1.5%
-  else sizePct = baseRisk * 0.5;                                               // 1% for NOTABLE
+  if (rec === "ACTIONABLE" && grokConf === "high") {
+    // 5% base, scale up to 8% for edges > 20%
+    sizePct = 0.05 + Math.min(grokEdge - MIN_GROK_EDGE, 0.10) * 0.3;
+  } else if (rec === "ACTIONABLE") {
+    sizePct = 0.03; // medium conf ACTIONABLE gets smaller size
+  } else {
+    sizePct = 0.02; // NOTABLE — minimal size
+  }
 
   let size = portfolioBalance * sizePct;
 
   // Floor and ceiling
   size = Math.max(MIN_TRADE, size);
-  size = Math.min(size, portfolioBalance * 0.03); // hard cap 3% of portfolio
+  size = Math.min(size, portfolioBalance * 0.10); // hard cap 10% of portfolio per trade
 
   return Math.floor(size);
 }
@@ -402,8 +407,8 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
         return { opp, enriched: true, vetoed: true, reason: `thin orderbook` };
       }
 
-      // 8. Hard gate: only ACTIONABLE/NOTABLE pass through
-      if (rec !== "ACTIONABLE" && rec !== "NOTABLE") {
+      // 8. Hard gate: only ACTIONABLE passes through (concentrated bets)
+      if (rec !== "ACTIONABLE") {
         const q = (market.question || "").slice(0, 60);
         const mktPct = ((market.prices?.[0] || 0) * 100).toFixed(1);
         const srcs = scoreResult.sources || [];
@@ -883,9 +888,9 @@ export async function cmdAutoTrade(args, opts = {}) {
       skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: "daily loss circuit breaker active" });
       continue;
     }
-    // HARD GATE: No Grok decision = no trade. Period.
-    if (opp._palphaRec !== "ACTIONABLE" && opp._palphaRec !== "NOTABLE") {
-      skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: `no Grok approval (_palphaRec=${opp._palphaRec || "none"})` });
+    // HARD GATE: Only ACTIONABLE trades execute. No exceptions.
+    if (opp._palphaRec !== "ACTIONABLE") {
+      skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: `not ACTIONABLE (_palphaRec=${opp._palphaRec || "none"})` });
       continue;
     }
     if (tradeCount >= maxTrades) {
