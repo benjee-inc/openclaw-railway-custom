@@ -452,7 +452,7 @@ async function detectNewsAlpha(markets) {
   try {
     // 1. Fetch breaking news from GDELT (last 4 hours, sorted by relevance)
     const params = new URLSearchParams({
-      query: "",
+      query: "politics OR economy OR crypto OR bitcoin OR Trump OR weather OR election OR war OR trade",
       mode: "ArtList",
       maxrecords: "50",
       timespan: "4h",
@@ -1147,6 +1147,16 @@ async function runScanCycle() {
         const tradeCount = tradeOutput.tradesExecuted?.length || 0;
         const vetoed = tradeOutput.vetoed || 0;
         console.log(`[scanner] auto-trade: ${tradeCount} executed, ${vetoed} vetoed, daily=$${(tradeOutput.dailySpend || 0).toFixed(2)}`);
+        // Log veto reasons and skip reasons for debugging
+        if (tradeOutput.vetoReasons && Object.keys(tradeOutput.vetoReasons).length > 0) {
+          console.log(`[scanner] veto reasons: ${JSON.stringify(tradeOutput.vetoReasons)}`);
+        }
+        if (tradeOutput.skipReasons && Object.keys(tradeOutput.skipReasons).length > 0) {
+          console.log(`[scanner] skip reasons: ${JSON.stringify(tradeOutput.skipReasons)}`);
+        }
+        if (tradeOutput.opportunities != null) {
+          console.log(`[scanner] pipeline: ${tradeOutput.opportunities} raw → ${tradeOutput.enriched || 0} enriched → ${tradeCount} executed`);
+        }
         if (tradeOutput.dashEntries) autoTradeEntries = tradeOutput.dashEntries;
       }
     } catch (err) {

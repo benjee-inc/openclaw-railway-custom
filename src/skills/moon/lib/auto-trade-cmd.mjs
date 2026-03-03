@@ -28,13 +28,13 @@ import { fetchOrderBook, analyzeDepth } from "../../polymarket-alpha/lib/depth.m
 const MAX_PER_DAY = Infinity;   // No daily limit (circuit breaker handles daily risk)
 const MIN_LIQUIDITY = 100_000;  // $100K minimum liquidity (event-level, not per-candidate)
 const MIN_LIQUIDITY_WEATHER = 50_000; // $50K for weather markets
-const MAX_TRADES_PER_INVOCATION = 1; // One trade per cycle — sniper mode
-const MAX_OPEN_POSITIONS = 3;   // Max 3 concentrated positions
+const MAX_TRADES_PER_INVOCATION = 2; // Two trades per cycle
+const MAX_OPEN_POSITIONS = 5;   // Max 5 active positions
 const MIN_TRADE = 25;           // $25 minimum
 const MAX_SPREAD_RATIO = 0.08;  // Down from 15% — tighter spread filter
 const DUST_VALUE_THRESHOLD = 0.50; // Positions worth < $0.50 are dust — don't count toward cap
 const DAILY_LOSS_CIRCUIT_BREAKER = -0.03; // Pause trading if daily P&L < -3% of portfolio
-const MIN_GROK_EDGE = 0.15;    // Require 15%+ edge between Grok probability and market price
+const MIN_GROK_EDGE = 0.08;    // Require 8%+ edge between Grok probability and market price
 const DATA_API = "https://data-api.polymarket.com";
 const DEFAULT_STALE_MS = 600_000; // 10 minutes
 const DEFAULT_REPO = "benjee-inc/polymarket-arb-dashboard";
@@ -422,7 +422,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
 
       // Volume spikes ALWAYS go to Grok — Grok must verify if news backs the volume.
       // Other signal types can be pre-filtered if no domain data.
-      if (domainHits.length === 0 && opp.score < 8 && !opp._requiresNewsVerification) {
+      if (domainHits.length === 0 && opp.score < 3 && !opp._requiresNewsVerification) {
         const q = (market.question || "").slice(0, 60);
         entries.push(`[pre-filter] "${q}" — no domain data (score=${opp.score.toFixed(1)}), skipping Grok`);
         return { opp, enriched: true, vetoed: true, reason: "pre-filter: no domain-specific data — Grok skipped" };
@@ -486,8 +486,8 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
         return { opp, enriched: true, vetoed: true, reason: `thin orderbook` };
       }
 
-      // 8. Hard gate: only ACTIONABLE passes through (concentrated bets)
-      if (rec !== "ACTIONABLE") {
+      // 8. Hard gate: ACTIONABLE or NOTABLE pass through
+      if (rec !== "ACTIONABLE" && rec !== "NOTABLE") {
         const q = (market.question || "").slice(0, 60);
         const mktPct = ((market.prices?.[0] || 0) * 100).toFixed(1);
         const srcs = scoreResult.sources || [];
@@ -505,7 +505,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
           entries.push(`[grok] "${q}" — unavailable (timeout or no API key)`);
         }
 
-        return { opp, enriched: true, vetoed: true, reason: `not enough edge` };
+        return { opp, enriched: true, vetoed: true, reason: `${rec} — not enough edge` };
       }
 
       // 9. Minimum edge gate: Grok probability must differ from market by MIN_GROK_EDGE
@@ -518,9 +518,9 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
         return { opp, enriched: true, vetoed: true, reason: `Grok edge too small: ${(grokEdge * 100).toFixed(1)}% < ${(MIN_GROK_EDGE * 100).toFixed(0)}%` };
       }
 
-      // 10. Require high confidence from Grok for ACTIONABLE trades
-      if (rec === "ACTIONABLE" && altData?.grok?.confidence !== "high") {
-        return { opp, enriched: true, vetoed: true, reason: `ACTIONABLE requires high Grok confidence, got ${altData?.grok?.confidence || "none"}` };
+      // 10. Require at least medium confidence from Grok
+      if (altData?.grok?.confidence === "low") {
+        return { opp, enriched: true, vetoed: true, reason: `Grok confidence too low (got "low")` };
       }
 
       opp._palphaRec = rec;
@@ -967,9 +967,9 @@ export async function cmdAutoTrade(args, opts = {}) {
       skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: "daily loss circuit breaker active" });
       continue;
     }
-    // HARD GATE: Only ACTIONABLE trades execute. No exceptions.
-    if (opp._palphaRec !== "ACTIONABLE") {
-      skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: `not ACTIONABLE (_palphaRec=${opp._palphaRec || "none"})` });
+    // HARD GATE: Only ACTIONABLE or NOTABLE trades execute.
+    if (opp._palphaRec !== "ACTIONABLE" && opp._palphaRec !== "NOTABLE") {
+      skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: `not ACTIONABLE/NOTABLE (_palphaRec=${opp._palphaRec || "none"})` });
       continue;
     }
     if (tradeCount >= maxTrades) {

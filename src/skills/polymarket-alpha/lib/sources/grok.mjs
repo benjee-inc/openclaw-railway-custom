@@ -125,10 +125,11 @@ export async function analyzeMarket(question, category, marketPrice, signalConte
                 "5. Estimate optimal hold time (minutes, hours, or days).\n" +
                 "6. List key risks that could invalidate your thesis.\n\n" +
                 "CALIBRATION RULES:\n" +
-                "- If your 95% CI spans more than 30 percentage points, your confidence MUST be 'low'.\n" +
-                "- If you cannot find recent news (<24h) confirming the signal, confidence MUST be 'low' or 'medium'.\n" +
-                "- Only use 'high' confidence when multiple independent sources confirm and CI < 15 points.\n" +
-                "- Markets priced 40-60% are inherently uncertain — default to 'medium' or 'low' unless strong evidence.\n\n" +
+                "- If your 95% CI spans more than 40 percentage points, your confidence MUST be 'low'.\n" +
+                "- Use 'high' confidence when you find strong evidence from recent sources (web search, X posts) and CI < 20 points.\n" +
+                "- Use 'medium' confidence when you have some evidence but not conclusive, or CI is 20-35 points.\n" +
+                "- Use 'low' only when you truly have no information advantage over the market.\n" +
+                "- If the market is clearly mispriced based on your search results, say so with 'high' confidence.\n\n" +
                 "Output ONLY a single valid JSON object. No other text.\n" +
                 '{"probability": 0.XX, "confidence_interval": [0.XX, 0.XX], "confidence": "high"|"medium"|"low", ' +
                 '"reasoning": "3-6 sentences", "key_signals": ["signal1", "signal2", "signal3"], ' +

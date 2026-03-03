@@ -878,8 +878,8 @@ function applyGrokModifier(altData, marketPrice, sources, currentImplied) {
   const newImplied = grokProb;
 
   // Confidence maps directly from Grok's self-assessed confidence
-  const grokConfidence = grok.confidence === "high" ? 0.70
-    : grok.confidence === "medium" ? 0.50 : 0.30;
+  const grokConfidence = grok.confidence === "high" ? 0.75
+    : grok.confidence === "medium" ? 0.55 : 0.30;
 
   const signals = grok.keySignals?.length > 0 ? ` Signals: ${grok.keySignals.slice(0, 3).join("; ")}.` : "";
   const comparison = grok.marketComparison ? ` vs Market: ${grok.marketComparison}` : "";
