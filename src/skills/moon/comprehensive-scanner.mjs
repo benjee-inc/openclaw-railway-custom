@@ -28,8 +28,10 @@ let cycleCount = 0;
 
 // Cross-cycle state
 let prevMidpoints = new Map(); // conditionId → midpoint
-const COOLDOWN_CYCLES = 6;
-let shownMarkets = new Map(); // question → lastShownCycle
+const COOLDOWN_CYCLES = 6;        // event-driven signals (flow, price shifts, movers)
+const STRUCTURAL_COOLDOWN = 48;   // structural signals (deep value, wide spread, tight races) — 4h at 5min interval
+let shownMarkets = new Map(); // question → { cycle, structural }
+let heldConditionIds = new Set(); // conditionIds of currently held positions — skip in scanner
 
 // Sports / entertainment noise filter — these are not tradeable alpha
 const SPORTS_PATTERNS = [
@@ -145,22 +147,56 @@ function tryJSON(v) {
 // ── Cooldown ─────────────────────────────────────────────
 
 function isOnCooldown(q) {
-  const last = shownMarkets.get(q);
-  return last != null && (cycleCount - last) < COOLDOWN_CYCLES;
+  const entry = shownMarkets.get(q);
+  if (!entry) return false;
+  const limit = entry.structural ? STRUCTURAL_COOLDOWN : COOLDOWN_CYCLES;
+  return (cycleCount - entry.cycle) < limit;
 }
 
-function markShown(q) { shownMarkets.set(q, cycleCount); }
+function markShown(q, structural = false) {
+  shownMarkets.set(q, { cycle: cycleCount, structural });
+}
 
-function pickFresh(items) {
+function isHeldPosition(conditionId) {
+  return conditionId && heldConditionIds.has(conditionId);
+}
+
+function pickFresh(items, structural = false) {
   for (const item of items) {
+    if (isHeldPosition(item.conditionId)) continue;
     if (!isOnCooldown(item.q || item.title)) return item;
   }
   return null;
 }
 
 function pruneCooldowns() {
-  for (const [q, cycle] of shownMarkets) {
-    if (cycleCount - cycle >= COOLDOWN_CYCLES) shownMarkets.delete(q);
+  for (const [q, entry] of shownMarkets) {
+    const limit = entry.structural ? STRUCTURAL_COOLDOWN : COOLDOWN_CYCLES;
+    if (cycleCount - entry.cycle >= limit) shownMarkets.delete(q);
+  }
+}
+
+async function refreshHeldPositions() {
+  try {
+    const address = await getWalletAddress();
+    if (!address) return;
+    const res = await fetch(
+      `${DATA_API}/positions?user=${address}`,
+      { signal: AbortSignal.timeout(10_000) },
+    );
+    if (!res.ok) return;
+    const positions = await res.json();
+    if (!Array.isArray(positions)) return;
+    const ids = new Set();
+    for (const p of positions) {
+      const size = parseFloat(p.size || 0);
+      const curPrice = parseFloat(p.curPrice || 0);
+      if (size <= 0 || size * curPrice < 0.50) continue; // skip dust
+      if (p.conditionId) ids.add(p.conditionId);
+    }
+    heldConditionIds = ids;
+  } catch (err) {
+    console.error(`[scanner] held positions refresh error: ${err.message}`);
   }
 }
 
@@ -402,7 +438,7 @@ function detectMidpointShifts(markets, liveMids) {
       const diff = mid - prev;
       if (Math.abs(diff) >= 0.005 && m.volume24h > 3000) {
         shifts.push({
-          q: m.question, from: prev, to: mid, diff,
+          q: m.question, conditionId: m.conditionId, from: prev, to: mid, diff,
           volume24h: m.volume24h,
         });
       }
@@ -424,8 +460,9 @@ function buildEntries(markets, signals, tradeFlows, midShifts) {
   // Scan header with real stats
   const liveCount = markets.filter((m) => (m.prices[0] || 0) > 0.001).length;
   const tradeVol = tradeFlows.reduce((s, f) => s + f.total, 0);
+  const heldSuffix = heldConditionIds.size > 0 ? ` | ${heldConditionIds.size} held` : "";
   entries.push(entry("scan",
-    `Cycle #${cycleCount} — ${liveCount} markets | ${tradeFlows.length} active events | ${fmtVol(tradeVol)} recent flow`
+    `Cycle #${cycleCount} — ${liveCount} markets | ${tradeFlows.length} active events | ${fmtVol(tradeVol)} recent flow${heldSuffix}`
   ));
 
   // 1. LIVE TRADE FLOW (freshest data — seconds old)
@@ -443,7 +480,7 @@ function buildEntries(markets, signals, tradeFlows, midShifts) {
 
   // 2. REAL-TIME MIDPOINT SHIFTS (since last scan)
   if (midShifts.length > 0) {
-    const shift = midShifts.find((s) => !isOnCooldown(s.q));
+    const shift = midShifts.find((s) => !isOnCooldown(s.q) && !isHeldPosition(s.conditionId));
     if (shift) {
       const dir = shift.diff > 0 ? "↑" : "↓";
       entries.push(entry("think",
@@ -454,20 +491,21 @@ function buildEntries(markets, signals, tradeFlows, midShifts) {
   }
 
   // 3. SIGNAL from rotating category
+  // structural=true → 4h cooldown (deep value, wide spread, tight races don't change fast)
   const categories = [
-    { key: "movers1h", fmt: (m) =>
+    { key: "movers1h", structural: false, fmt: (m) =>
       `${m.dir} Hourly mover: "${truncQ(m.q)}" ${m.dir}${fmtPct(Math.abs(m.change1h))} in 1h (now ${fmtPct(m.price)}), 24h vol ${fmtVol(m.volume24h)}` },
-    { key: "volumeSpikes", fmt: (m) =>
+    { key: "volumeSpikes", structural: false, fmt: (m) =>
       `Volume surge: "${truncQ(m.q)}" — ${fmtVol(m.volume24h)} in 24h (${(m.ratio * 100).toFixed(0)}% of lifetime), ${m.change1h != null ? (m.change1h > 0 ? "↑" : "↓") + fmtPct(Math.abs(m.change1h)) + " this hour" : `price ${fmtPct(m.price)}`}` },
-    { key: "catalysts", fmt: (m) =>
+    { key: "catalysts", structural: false, fmt: (m) =>
       `Catalyst: "${truncQ(m.q)}" — ${hoursLeft(m.endDate)} to resolution, ${fmtPct(m.price)} YES, ${m.change1h != null ? (m.change1h > 0 ? "↑" : "↓") + fmtPct(Math.abs(m.change1h)) + " this hour, " : ""}vol ${fmtVol(m.volume24h)}` },
-    { key: "wideSpread", fmt: (m) =>
+    { key: "wideSpread", structural: true, fmt: (m) =>
       `Wide spread: "${truncQ(m.q)}" — bid ${fmtPct(m.bid)} / ask ${fmtPct(m.ask)} (${fmtPct(m.spread)} spread), liq ${fmtVol(m.liquidity)}` },
-    { key: "deepValue", fmt: (m) =>
+    { key: "deepValue", structural: true, fmt: (m) =>
       `Deep value: "${truncQ(m.q)}" — ${m.outcome} @ ${fmt$(m.price)}, liq ${fmtVol(m.liquidity)}, 24h vol ${fmtVol(m.volume24h)}${m.change1h != null ? `, ${m.change1h > 0 ? "↑" : "↓"}${fmtPct(Math.abs(m.change1h))} 1h` : ""}` },
-    { key: "tightRaces", fmt: (m) =>
+    { key: "tightRaces", structural: true, fmt: (m) =>
       `Tight race: "${truncQ(m.q)}" — ${fmtPct(m.price)} YES, 24h vol ${fmtVol(m.volume24h)}${m.change1h != null ? `, ${m.change1h > 0 ? "↑" : "↓"}${fmtPct(Math.abs(m.change1h))} 1h` : ""}` },
-    { key: "movers1d", fmt: (m) => {
+    { key: "movers1d", structural: false, fmt: (m) => {
       const wk = m.change1w != null ? `, ${m.change1w > 0 ? "↑" : "↓"}${fmtPct(Math.abs(m.change1w))} 1w` : "";
       return `${m.dir} Daily mover: "${truncQ(m.q)}" ${m.dir}${fmtPct(Math.abs(m.change1d))} today${wk}, 24h vol ${fmtVol(m.volume24h)}`;
     }},
@@ -479,10 +517,10 @@ function buildEntries(markets, signals, tradeFlows, midShifts) {
     const cat = categories[(start + i) % categories.length];
     const items = signals[cat.key];
     if (!items || items.length === 0) continue;
-    const item = pickFresh(items);
+    const item = pickFresh(items, cat.structural);
     if (!item) continue;
     entries.push(entry("think", cat.fmt(item)));
-    markShown(item.q || item.title);
+    markShown(item.q || item.title, cat.structural);
     emitted++;
   }
 
@@ -893,6 +931,9 @@ async function runScanCycle() {
   let tradeOutput = null;
 
   try {
+    // Refresh held positions so we skip markets we already own
+    await refreshHeldPositions();
+
     // Fetch all data sources in parallel
     [trades, markets] = await Promise.all([
       fetchRecentTrades().catch((e) => { console.error(`[scanner] trades error: ${e.message}`); return []; }),
