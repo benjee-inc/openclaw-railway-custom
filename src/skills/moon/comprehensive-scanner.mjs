@@ -419,6 +419,134 @@ function detectAlpha(markets) {
   return signals;
 }
 
+// ── News-first alpha: GDELT → market matching ───────────
+
+const GDELT_API = "https://api.gdeltproject.org/api/v2/doc/doc";
+const STOP_WORDS = new Set([
+  "the","a","an","and","or","but","in","on","at","to","for","of","is","are",
+  "was","were","be","been","will","would","could","should","has","have","had",
+  "do","does","did","not","no","so","if","than","that","this","with","from",
+  "by","as","it","its","they","them","their","he","she","his","her","we","our",
+  "you","your","can","may","about","up","out","all","more","also","into",
+  "over","after","before","between","under","new","said","says",
+]);
+
+function extractKeywords(text) {
+  return text.toLowerCase()
+    .replace(/[^a-z0-9\s'-]/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+}
+
+function matchScore(newsKeywords, marketQuestion) {
+  const mktWords = new Set(extractKeywords(marketQuestion));
+  let hits = 0;
+  for (const kw of newsKeywords) {
+    if (mktWords.has(kw)) hits++;
+  }
+  return hits;
+}
+
+async function detectNewsAlpha(markets) {
+  const newsMatches = [];
+  try {
+    // 1. Fetch breaking news from GDELT (last 4 hours, sorted by relevance)
+    const params = new URLSearchParams({
+      query: "",
+      mode: "ArtList",
+      maxrecords: "50",
+      timespan: "4h",
+      format: "json",
+      sort: "HybridRel",
+    });
+    const res = await fetch(`${GDELT_API}?${params}`, {
+      headers: { Accept: "application/json", "User-Agent": "polymarket-alpha/1.0" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return newsMatches;
+    const data = await res.json();
+    const articles = data.articles || [];
+    if (articles.length === 0) return newsMatches;
+
+    // 2. Cluster articles by topic (group overlapping headlines)
+    const topics = [];
+    for (const art of articles) {
+      const title = art.title || "";
+      if (!title || title.length < 15) continue;
+      const kws = extractKeywords(title);
+      if (kws.length < 2) continue;
+
+      // Try to merge into existing topic
+      let merged = false;
+      for (const topic of topics) {
+        const overlap = kws.filter(k => topic.keywords.has(k)).length;
+        if (overlap >= 2) {
+          topic.articleCount++;
+          for (const k of kws) topic.keywords.add(k);
+          if (!topic.titles.includes(title)) topic.titles.push(title);
+          topic.tone += Number(art.tone || 0);
+          merged = true;
+          break;
+        }
+      }
+      if (!merged) {
+        topics.push({
+          keywords: new Set(kws),
+          titles: [title],
+          articleCount: 1,
+          tone: Number(art.tone || 0),
+          domain: art.domain || "",
+        });
+      }
+    }
+
+    // 3. For each topic cluster, find matching Polymarket markets
+    for (const topic of topics) {
+      if (topic.articleCount < 2) continue; // need 2+ articles = real story
+      const topicKws = [...topic.keywords];
+      const avgTone = topic.articleCount > 0 ? topic.tone / topic.articleCount : 0;
+
+      for (const m of markets) {
+        if (isSportsMarket(m.question)) continue;
+        const score = matchScore(topicKws, m.question);
+        if (score < 2) continue; // need 2+ keyword matches
+
+        // Score: keyword matches × article count × liquidity factor
+        const liqFactor = Math.log10(Math.max(m.liquidity, 1000));
+        const finalScore = score * topic.articleCount * liqFactor;
+
+        newsMatches.push({
+          q: m.question,
+          conditionId: m.conditionId,
+          eventSlug: m.eventSlug,
+          price: m.prices[0] || 0,
+          liquidity: m.liquidity,
+          volume24h: m.volume24h,
+          keywordHits: score,
+          articleCount: topic.articleCount,
+          avgTone,
+          headlines: topic.titles.slice(0, 3),
+          score: finalScore,
+        });
+      }
+    }
+
+    newsMatches.sort((a, b) => b.score - a.score);
+    // Dedup by conditionId — keep highest score
+    const seen = new Set();
+    const deduped = [];
+    for (const nm of newsMatches) {
+      if (seen.has(nm.conditionId)) continue;
+      seen.add(nm.conditionId);
+      deduped.push(nm);
+    }
+    return deduped.slice(0, 10); // top 10 news-matched markets
+  } catch (err) {
+    console.error(`[scanner] news-alpha error: ${err.message}`);
+    return [];
+  }
+}
+
 // ── Cross-cycle midpoint deltas ──────────────────────────
 
 function detectMidpointShifts(markets, liveMids) {
@@ -452,7 +580,7 @@ function detectMidpointShifts(markets, liveMids) {
 
 // ── Build output entries ─────────────────────────────────
 
-function buildEntries(markets, signals, tradeFlows, midShifts) {
+function buildEntries(markets, signals, tradeFlows, midShifts, newsMatches = []) {
   const entries = [];
   cycleCount++;
   pruneCooldowns();
@@ -475,6 +603,18 @@ function buildEntries(markets, signals, tradeFlows, midShifts) {
         `Live flow: "${truncQ(flow.q)}" — ${fmtVol(flow.total)} in ${flow.buys + flow.sells} trades, ${dir}${bias}, biggest ${fmtVol(flow.biggestTrade)}, ${ago(flow.lastTs)}`
       ));
       markShown(flow.q);
+    }
+  }
+
+  // 1b. NEWS-FIRST ALPHA (breaking news → market matches)
+  if (newsMatches.length > 0) {
+    const nm = newsMatches.find((n) => !isOnCooldown(n.q) && !isHeldPosition(n.conditionId));
+    if (nm) {
+      const headline = nm.headlines[0] ? `"${nm.headlines[0].slice(0, 60)}"` : "";
+      entries.push(entry("think",
+        `News match: "${truncQ(nm.q)}" — ${nm.articleCount} articles, ${nm.keywordHits} keyword hits, tone ${nm.avgTone > 0 ? "+" : ""}${nm.avgTone.toFixed(1)} ${headline}`
+      ));
+      markShown(nm.q);
     }
   }
 
@@ -607,7 +747,7 @@ function getSignalDir() {
   return join(homedir(), ".moon");
 }
 
-function writeSignalsToFile(markets, signals, tradeFlows, midShifts) {
+function writeSignalsToFile(markets, signals, tradeFlows, midShifts, newsMatches = []) {
   try {
     const dir = getSignalDir();
     mkdirSync(dir, { recursive: true });
@@ -622,6 +762,7 @@ function writeSignalsToFile(markets, signals, tradeFlows, midShifts) {
       signals,
       tradeFlows,
       midShifts,
+      newsMatches,
     };
     writeFileSync(tmp, JSON.stringify(data), "utf-8");
     renameSync(tmp, file);
@@ -929,6 +1070,7 @@ async function runScanCycle() {
   let signals = {};
   let midShifts = [];
   let tradeOutput = null;
+  let newsMatches = [];
 
   try {
     // Refresh held positions so we skip markets we already own
@@ -953,10 +1095,16 @@ async function runScanCycle() {
     signals = detectAlpha(markets);
     midShifts = detectMidpointShifts(markets, liveMids);
 
-    newEntries = buildEntries(markets, signals, tradeFlows, midShifts);
+    // News-first alpha: fetch breaking news → match to markets
+    newsMatches = await detectNewsAlpha(markets).catch((e) => {
+      console.error(`[scanner] news-alpha error: ${e.message}`);
+      return [];
+    });
+
+    newEntries = buildEntries(markets, signals, tradeFlows, midShifts, newsMatches);
 
     // Write structured signals to disk for moon auto-trade
-    writeSignalsToFile(markets, signals, tradeFlows, midShifts);
+    writeSignalsToFile(markets, signals, tradeFlows, midShifts, newsMatches);
 
     // Run auto-trade inline (no cron agent needed)
     try {
@@ -1095,7 +1243,7 @@ async function runScanCycle() {
     const { sha, entries: existing } = await getExistingJsonl(token, repo);
     const parsedNew = newEntries.map((e) => typeof e === "string" ? JSON.parse(e) : e);
     const pipelineEntries = pipelineEntry ? [pipelineEntry] : [];
-    const combined = [...existing, ...autoTradeEntries, ...profitEntries, ...pnlEntries, ...pipelineEntries, ...parsedNew];
+    const combined = [...existing, ...parsedNew, ...pipelineEntries, ...profitEntries, ...pnlEntries, ...autoTradeEntries];
     const trimmed = combined.slice(-MAX_ENTRIES);
     await pushJsonl(token, repo, sha, trimmed);
     console.log(`[scanner] pushed ${newEntries.length} scan + ${autoTradeEntries.length} trade entries (total: ${trimmed.length})`);

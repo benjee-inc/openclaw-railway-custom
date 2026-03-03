@@ -164,7 +164,7 @@ const TOXIC_KEYWORDS = [
   "khameinei", "khamenei", "iran nuclear", "raimondo",
 ];
 
-function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
+function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay, newsMatches = []) {
   const opportunities = [];
 
   const marketMap = new Map();
@@ -181,6 +181,30 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
     }
     if (flow.q) return questionMap.get(flow.q) || null;
     return null;
+  }
+
+  // 0. NEWS-FIRST: Breaking news matched to markets (highest priority)
+  for (const nm of newsMatches.slice(0, 5)) {
+    if (!nm.conditionId) continue;
+    const market = marketMap.get(nm.conditionId);
+    if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
+    if (nm.price > MAX_PRICE || nm.price < MIN_PRICE) continue;
+    if (isSportsMarket(nm.q || market.question || "")) continue;
+
+    // Direction: positive tone → buy yes, negative → buy no
+    const outcome = nm.avgTone >= 0 ? "yes" : "no";
+    const amount = sizePosition(nm.score, "news", dailySpend, maxDay);
+    if (amount < MIN_TRADE || dailySpend + amount > maxDay) continue;
+
+    const headlineText = nm.headlines.slice(0, 2).map(h => `"${h.slice(0, 70)}"`).join("; ");
+    opportunities.push({
+      conditionId: nm.conditionId, outcome, amount,
+      reason: `News-driven: ${nm.articleCount} articles, ${nm.keywordHits} keyword hits`,
+      signalType: "news", score: nm.score * 3, // highest priority
+      question: nm.q, liquidity: market.liquidity,
+      _requiresNewsVerification: true,
+      _signalContext: `NEWS-FIRST SIGNAL: ${nm.articleCount} breaking news articles match this market (${nm.keywordHits} keyword hits, avg tone: ${nm.avgTone.toFixed(1)}). Headlines: ${headlineText}. Current market price: ${(nm.price * 100).toFixed(1)}%. Analyze whether these news articles create a probability edge vs the current market price. If the news is material and the market hasn't adjusted yet, classify as ACTIONABLE.`,
+    });
   }
 
   // 1. Trade flow imbalance — require sustained volume
@@ -805,11 +829,11 @@ export async function cmdAutoTrade(args, opts = {}) {
   // 4. Prune expired cooldowns
   pruneAutoTraderCooldowns();
 
-  const { markets, signals, tradeFlows, midShifts } = signalData;
+  const { markets, signals, tradeFlows, midShifts, newsMatches } = signalData;
   const log = [];
 
   // 6. Evaluate scanner signals
-  const rawOpportunities = evaluateSignals(signals, tradeFlows || [], markets, atState.dailySpend, maxDay);
+  const rawOpportunities = evaluateSignals(signals, tradeFlows || [], markets, atState.dailySpend, maxDay, newsMatches || []);
   log.push(`Found ${rawOpportunities.length} potential trades from scanner`);
 
   // 7. Palpha enrichment + hard gate
