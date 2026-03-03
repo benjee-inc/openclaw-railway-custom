@@ -891,9 +891,10 @@ function applyGrokModifier(altData, marketPrice, sources, currentImplied) {
  * Classify alpha score into recommendation.
  */
 export function recommendation(alpha, confidence) {
-  if (alpha >= 0.15 && confidence >= 0.5) return "ACTIONABLE";
-  if (alpha >= 0.08 && confidence >= 0.35) return "NOTABLE";
-  if (alpha >= 0.03) return "MONITOR";
+  // Raised thresholds — fewer but higher-quality trades
+  if (alpha >= 0.15 && confidence >= 0.6) return "ACTIONABLE";
+  if (alpha >= 0.10 && confidence >= 0.45) return "NOTABLE";
+  if (alpha >= 0.05) return "MONITOR";
   return "NOISE";
 }
 

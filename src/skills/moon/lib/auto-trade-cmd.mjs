@@ -9,6 +9,7 @@ import {
   getAutoTraderState, canAutoTrade, recordAutoTrade,
   setAutoTraderLastCycle, pruneAutoTraderCooldowns, isRecentlyAutoTraded,
   getPolyBets, addPolyBet, addJournalEntry, addNarrative,
+  getDailyPnl,
 } from "./state.mjs";
 import { getMarket, placeBet, placeLimitBet } from "./polymarket.mjs";
 
@@ -24,14 +25,16 @@ import { fetchOrderBook, analyzeDepth } from "../../polymarket-alpha/lib/depth.m
 
 // ── Constants ────────────────────────────────────────────
 
-const MAX_PER_DAY = Infinity;   // No daily limit
-const MIN_LIQUIDITY = 50_000;   // $50K minimum liquidity
-const MIN_LIQUIDITY_WEATHER = 10_000; // $10K for weather markets
-const MAX_TRADES_PER_INVOCATION = 3;
-const MAX_OPEN_POSITIONS = 10;  // Never hold more than 10 positions at once
-const MIN_TRADE = 25;           // $25 minimum — lower floor allows more frequent smaller bets
-const MAX_SPREAD_RATIO = 0.15;  // Skip trades where spread > 15% of entry price
+const MAX_PER_DAY = Infinity;   // No daily limit (circuit breaker handles daily risk)
+const MIN_LIQUIDITY = 200_000;  // $200K minimum liquidity (event-level, not per-candidate)
+const MIN_LIQUIDITY_WEATHER = 50_000; // $50K for weather markets
+const MAX_TRADES_PER_INVOCATION = 2; // Down from 3 — fewer, higher-quality trades
+const MAX_OPEN_POSITIONS = 5;   // Down from 10 — concentrated portfolio
+const MIN_TRADE = 10;           // $10 minimum — smaller bets with 2% risk model
+const MAX_SPREAD_RATIO = 0.08;  // Down from 15% — tighter spread filter
 const DUST_VALUE_THRESHOLD = 0.50; // Positions worth < $0.50 are dust — don't count toward cap
+const DAILY_LOSS_CIRCUIT_BREAKER = -0.03; // Pause trading if daily P&L < -3% of portfolio
+const MIN_GROK_EDGE = 0.12;    // Require 12%+ edge between Grok probability and market price
 const DATA_API = "https://data-api.polymarket.com";
 const DEFAULT_STALE_MS = 600_000; // 10 minutes
 const DEFAULT_REPO = "benjee-inc/polymarket-arb-dashboard";
@@ -118,33 +121,23 @@ function sizePosition(score, signalType, dailySpend, maxDay) {
 }
 
 // Conviction-based sizing after palpha enrichment
-// Sized to target ~2% daily portfolio return with 3-6 trades/day
+// Max 2% of portfolio at risk per trade — conservative Kelly
 function sizeByConviction(opp, portfolioBalance) {
-  const alpha = opp._palphaAlpha || 0;
-  const conf = opp._palphaConf || 0.3;
   const rec = opp._palphaRec || "NOTABLE";
   const grokConf = opp._grokConf || "low";
 
-  // Kelly-inspired fraction: bet size proportional to edge * confidence
-  // f = edge * confidence, capped for safety
-  const edge = Math.min(alpha, 0.40); // cap edge at 40%
-  const kellyFraction = edge * conf;
+  // 2% of portfolio is the max risk per trade
+  const baseRisk = 0.02;
+  let sizePct;
+  if (rec === "ACTIONABLE" && grokConf === "high") sizePct = baseRisk * 1.0;   // 2%
+  else if (rec === "ACTIONABLE") sizePct = baseRisk * 0.75;                    // 1.5%
+  else sizePct = baseRisk * 0.5;                                               // 1% for NOTABLE
 
-  // Base allocation as % of portfolio — aggressive enough for 2% daily target
-  // ACTIONABLE + high grok: up to 12% of portfolio
-  // ACTIONABLE + medium grok: up to 8%
-  // NOTABLE: up to 5%
-  let maxPct;
-  if (rec === "ACTIONABLE" && grokConf === "high") maxPct = 0.12;
-  else if (rec === "ACTIONABLE") maxPct = 0.08;
-  else maxPct = 0.05;
-
-  // Scale by kelly fraction (higher edge+conf = larger bet)
-  let size = portfolioBalance * Math.min(kellyFraction, maxPct);
+  let size = portfolioBalance * sizePct;
 
   // Floor and ceiling
   size = Math.max(MIN_TRADE, size);
-  size = Math.min(size, portfolioBalance * 0.15); // max 15% of portfolio on one trade
+  size = Math.min(size, portfolioBalance * 0.03); // hard cap 3% of portfolio
 
   return Math.floor(size);
 }
@@ -157,6 +150,7 @@ function getMinLiquidity(question) {
 }
 
 const MIN_PRICE = 0.35; // Don't bet on outliers below 35% odds — low-price markets have devastating spreads
+const MAX_PRICE = 0.85; // Don't bet on near-certainties — tiny upside, full downside
 
 function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
   const opportunities = [];
@@ -177,12 +171,13 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
     return null;
   }
 
-  // 1. Trade flow imbalance
+  // 1. Trade flow imbalance — require sustained volume
   for (const flow of tradeFlows) {
-    if (flow.imbalance < 0.6 || flow.total < 2000) continue;
+    if (flow.imbalance < 0.65 || flow.total < 5000) continue; // raised from 0.6/$2K
     const market = resolveMarket(flow);
     if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
-    if ((market.prices?.[0] || 0) < MIN_PRICE) continue;
+    const p = market.prices?.[0] || 0;
+    if (p < MIN_PRICE || p > MAX_PRICE) continue;
     if (isSportsMarket(flow.q || market.question || "")) continue;
     const condId = flow.conditionId || market.conditionId;
     if (!condId) continue;
@@ -200,12 +195,13 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
     });
   }
 
-  // 2. Hourly momentum
-  for (const m of (signals.movers1h || [])) {
+  // 2. Hourly momentum — only top 3, require sustained move
+  for (const m of (signals.movers1h || []).slice(0, 3)) {
     if (!m.conditionId) continue;
     const market = marketMap.get(m.conditionId);
     if (!market || market.liquidity < getMinLiquidity(market.question)) continue;
-    if (m.price > 0.95 || m.price < MIN_PRICE) continue;
+    if (m.price > MAX_PRICE || m.price < MIN_PRICE) continue;
+    if (Math.abs(m.change1h) < 0.03) continue; // require 3%+ move, not just noise
     if (isSportsMarket(m.q || market.question || "")) continue;
 
     const outcome = m.change1h > 0 ? "yes" : "no";
@@ -251,7 +247,7 @@ function evaluateSignals(signals, tradeFlows, markets, dailySpend, maxDay) {
     // Weather markets in the 30-70% range are tradeable — NWS data provides edge
     const isWeather = categorize(market.question || "").category === "weather";
     if (!isWeather && m.price >= 0.30 && m.price <= 0.70) continue;
-    if (m.hrsLeft > 48) continue;
+    if (m.hrsLeft < 6 || m.hrsLeft > 168) continue; // sweet spot: 6h to 7 days
     if (isSportsMarket(m.q || market.question || "")) continue;
 
     const outcome = m.price > 0.5 ? "yes" : "no";
@@ -428,6 +424,21 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
         return { opp, enriched: true, vetoed: true, reason: `not enough edge` };
       }
 
+      // 9. Minimum edge gate: Grok probability must differ from market by MIN_GROK_EDGE
+      const grokProb = altData?.grok?.probability;
+      const marketP = market.prices?.[0] || 0;
+      const grokEdge = grokProb != null ? Math.abs(grokProb - marketP) : 0;
+      if (grokEdge < MIN_GROK_EDGE) {
+        const q = (market.question || "").slice(0, 60);
+        entries.push(`[edge] "${q}" — Grok edge ${(grokEdge * 100).toFixed(1)}% < ${(MIN_GROK_EDGE * 100).toFixed(0)}% minimum`);
+        return { opp, enriched: true, vetoed: true, reason: `Grok edge too small: ${(grokEdge * 100).toFixed(1)}% < ${(MIN_GROK_EDGE * 100).toFixed(0)}%` };
+      }
+
+      // 10. Require high confidence from Grok for ACTIONABLE trades
+      if (rec === "ACTIONABLE" && altData?.grok?.confidence !== "high") {
+        return { opp, enriched: true, vetoed: true, reason: `ACTIONABLE requires high Grok confidence, got ${altData?.grok?.confidence || "none"}` };
+      }
+
       opp._palphaRec = rec;
       opp._palphaAlpha = scoreResult.alpha;
       opp._palphaConf = scoreResult.confidence;
@@ -436,6 +447,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
       opp._depthScore = depthResult?.depthScore ?? null;
       opp._depthSlippage = depthResult?.slippage?.["$100"] ?? null;
       opp._grokConf = altData?.grok?.confidence || null;
+      opp._grokEdge = grokEdge;
       opp.score = adjustedScore;
 
       const elapsed = ((Date.now() - started) / 1000).toFixed(1);
@@ -753,7 +765,8 @@ export async function cmdAutoTrade(args, opts = {}) {
     palphaRecommendations = result.recommendations || {};
     log.push(...result.entries);
   } catch (err) {
-    log.push(`[palpha] Error: ${err.message}. Using raw scores.`);
+    log.push(`[palpha] Error: ${err.message}. No trades without Grok.`);
+    opportunities = []; // CRITICAL: never trade on raw scores
   }
 
   // 8. Network violations — DISABLED
@@ -793,6 +806,18 @@ export async function cmdAutoTrade(args, opts = {}) {
       log.push(`[sizing] "${(opp.question || "").slice(0, 45)}" — ${opp._palphaRec} alpha=${((opp._palphaAlpha || 0) * 100).toFixed(0)}% grok=${opp._grokConf || "n/a"} → $${opp.amount} (portfolio $${portfolioBalance.toFixed(0)})`);
     }
   }
+
+  // 8d. Daily loss circuit breaker — pause trading if down > 3% of portfolio
+  let circuitBroken = false;
+  try {
+    const dailyPnl = getDailyPnl();
+    const realizedPnl = dailyPnl.realizedPnl || 0;
+    const threshold = portfolioBalance * DAILY_LOSS_CIRCUIT_BREAKER; // negative number
+    if (realizedPnl < threshold) {
+      circuitBroken = true;
+      log.push(`[CIRCUIT BREAKER] Daily realized P&L $${realizedPnl.toFixed(2)} < ${(DAILY_LOSS_CIRCUIT_BREAKER * 100).toFixed(0)}% of portfolio ($${threshold.toFixed(2)}). NO NEW TRADES.`);
+    }
+  } catch {}
 
   // 9. Execute trades
   const tradesExecuted = [];
@@ -853,6 +878,11 @@ export async function cmdAutoTrade(args, opts = {}) {
   }
 
   for (const opp of opportunities) {
+    // CIRCUIT BREAKER: no new trades when daily loss limit hit
+    if (circuitBroken) {
+      skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: "daily loss circuit breaker active" });
+      continue;
+    }
     // HARD GATE: No Grok decision = no trade. Period.
     if (opp._palphaRec !== "ACTIONABLE" && opp._palphaRec !== "NOTABLE") {
       skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: `no Grok approval (_palphaRec=${opp._palphaRec || "none"})` });

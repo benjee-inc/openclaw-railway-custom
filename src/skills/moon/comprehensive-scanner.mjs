@@ -648,8 +648,8 @@ async function getWalletAddress() {
 
 // ── Auto-sell: take profit + stop loss ────────────────────
 
-const TAKE_PROFIT_PCT = 50;   // sell when position is up 50%+ — faster turnover for 2% daily target
-const STOP_LOSS_PCT = -25;    // sell when position is down 25%+ — tighter stop to preserve capital
+const TAKE_PROFIT_PCT = 30;   // take profit at +30% — lock in gains
+const STOP_LOSS_PCT = -15;    // tighter stop-loss at -15% — preserve capital
 const MIN_EXIT_PRICE = 0.005; // never sell below 0.5¢ — better to let it expire worthless than give away shares
 
 async function autoTakeProfit() {

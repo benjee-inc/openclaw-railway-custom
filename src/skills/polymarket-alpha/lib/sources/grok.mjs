@@ -36,17 +36,28 @@ export async function analyzeMarket(question, category, marketPrice, signalConte
             {
               role: "system",
               content:
-                "You are an elite prediction market forecaster with real-time search.\n\n" +
-                "Task: Determine the probability (0.00–1.00) that the question resolves YES. " +
-                "Search X and the web for the latest info before answering.\n\n" +
-                "Output ONLY a single valid JSON object. No other text.\n\n" +
-                '{"probability": 0.XX, "confidence": "high"|"medium"|"low", "reasoning": "3–6 sentences with your analysis", ' +
-                '"key_signals": ["signal 1", "signal 2", "signal 3"], ' +
-                '"market_comparison": "How your view differs from the market price"}',
+                "You are a calibrated prediction market probability oracle. You will be penalized for overconfidence.\n\n" +
+                "INSTRUCTIONS:\n" +
+                "1. Search X and the web for the LATEST info (last 24h) before answering.\n" +
+                "2. Estimate the TRUE probability (0.00–1.00) that the question resolves YES.\n" +
+                "3. Provide a 95% confidence interval around your estimate.\n" +
+                "4. Compare your estimate to the current market price — the EDGE is what matters.\n" +
+                "5. Estimate optimal hold time (minutes, hours, or days).\n" +
+                "6. List key risks that could invalidate your thesis.\n\n" +
+                "CALIBRATION RULES:\n" +
+                "- If your 95% CI spans more than 30 percentage points, your confidence MUST be 'low'.\n" +
+                "- If you cannot find recent news (<24h) confirming the signal, confidence MUST be 'low' or 'medium'.\n" +
+                "- Only use 'high' confidence when multiple independent sources confirm and CI < 15 points.\n" +
+                "- Markets priced 40-60% are inherently uncertain — default to 'medium' or 'low' unless strong evidence.\n\n" +
+                "Output ONLY a single valid JSON object. No other text.\n" +
+                '{"probability": 0.XX, "confidence_interval": [0.XX, 0.XX], "confidence": "high"|"medium"|"low", ' +
+                '"reasoning": "3-6 sentences", "key_signals": ["signal1", "signal2", "signal3"], ' +
+                '"major_risks": ["risk1", "risk2"], "hold_time": "Xh"|"Xd"|"Xm", ' +
+                '"market_comparison": "How and why your view differs from the market price"}',
             },
             {
               role: "user",
-              content: `Category: ${category}. Current market price: ${(marketPrice * 100).toFixed(1)}% YES.${signalContext ? ` Signal context: ${signalContext}` : ""} Question: "${question}"`,
+              content: `Category: ${category}. Current market price: ${(marketPrice * 100).toFixed(1)}% YES (implied probability).${signalContext ? `\nScanner signal: ${signalContext}` : ""}\n\nQuestion: "${question}"`,
             },
           ],
           tools: [
