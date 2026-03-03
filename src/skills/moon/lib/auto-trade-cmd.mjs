@@ -307,7 +307,7 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
   });
 
   const top = preFiltered.slice(0, topN);
-  if (top.length === 0) return { enriched: opportunities.filter(o => !isVetoed(o.conditionId)), entries, vetoed: opportunities.length - preFiltered.length };
+  if (top.length === 0) return { enriched: [], entries, vetoed: opportunities.length, vetoReasons: { "all vetoed/filtered": opportunities.length }, recommendations: {} };
 
   const mktMap = new Map();
   for (const m of markets) {
@@ -513,14 +513,9 @@ async function enrichWithPalpha(opportunities, markets, topN = 5) {
     enrichedOpps.push(opp);
   }
 
-  // Only pass through opportunities that were NOT in the top-N enrichment set.
-  // Top-N opps that timed out or errored are vetoed — no Grok = no trade.
-  const topIds = new Set(top.map((o) => o.conditionId));
-  for (const opp of opportunities) {
-    if (!topIds.has(opp.conditionId)) {
-      enrichedOpps.push(opp);
-    }
-  }
+  // GROK-ONLY: Do NOT pass through non-enriched opportunities.
+  // Every trade MUST have a Grok decision (ACTIONABLE or NOTABLE).
+  // Non-top-N opportunities are discarded — no Grok = no trade.
 
   enrichedOpps.sort((a, b) => (b._palphaAdjustedScore || b.score) - (a._palphaAdjustedScore || a.score));
   return { enriched: enrichedOpps, entries, vetoed: vetoedCount, vetoReasons, recommendations };
@@ -858,6 +853,11 @@ export async function cmdAutoTrade(args, opts = {}) {
   }
 
   for (const opp of opportunities) {
+    // HARD GATE: No Grok decision = no trade. Period.
+    if (opp._palphaRec !== "ACTIONABLE" && opp._palphaRec !== "NOTABLE") {
+      skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: `no Grok approval (_palphaRec=${opp._palphaRec || "none"})` });
+      continue;
+    }
     if (tradeCount >= maxTrades) {
       skipped.push({ conditionId: opp.conditionId, question: opp.question, reason: "max trades per invocation" });
       continue;
